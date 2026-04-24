@@ -1,5 +1,7 @@
 build/
 build-*/
+cmake-build-*/
+install/
 .cache/
 .vscode/
 .idea/
@@ -8,3 +10,4 @@ compile_commands.json
 *.user.*
 *.autosave
 CMakeUserPresets.json
+*.log
