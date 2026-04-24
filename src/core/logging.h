@@ -1,0 +1,8 @@
+#pragma once
+
+#include <QLoggingCategory>
+
+Q_DECLARE_LOGGING_CATEGORY(lcPikvm)
+Q_DECLARE_LOGGING_CATEGORY(lcConfig)
+Q_DECLARE_LOGGING_CATEGORY(lcHid)
+Q_DECLARE_LOGGING_CATEGORY(lcWs)

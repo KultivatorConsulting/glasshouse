@@ -1,0 +1,46 @@
+# Glasshouse configuration — matches DESIGN.md §8 schema.
+#
+# Secrets referenced via `secret://<name>` resolve to env vars:
+#     secret://pikvm-1-passwd  ->  GLASSHOUSE_SECRET_PIKVM_1_PASSWD
+# (uppercase, non-alphanumerics replaced with `_`).
+
+target:
+  logical_desktop:
+    width: 3840           # N=2, two 1920x1080 side by side
+    height: 1080
+
+  monitors:
+    - id: 1
+      origin: [0, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.71
+    - id: 2
+      origin: [1920, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.72
+
+# Exactly one entry in target.monitors must match hid_master.
+hid_master: 192.168.1.71
+
+auth:
+  192.168.1.71:
+    user: admin
+    password_ref: secret://pikvm-1-passwd
+    # totp_secret_ref: secret://pikvm-1-totp   # optional, base32 TOTP seed
+    insecure_tls: true                          # PiKVMs ship self-signed certs
+  192.168.1.72:
+    user: admin
+    password_ref: secret://pikvm-2-passwd
+    insecure_tls: true
+
+release_hotkey: "Ctrl+Alt+Shift+Escape"
+
+video:
+  prefer_hw_decode: true
+  target_fps: 60
+
+windows:
+  - target_monitor: 1
+    geometry: { x: 0,   y: 0, w: 960, h: 540 }
+  - target_monitor: 2
+    geometry: { x: 960, y: 0, w: 960, h: 540 }

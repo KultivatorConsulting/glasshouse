@@ -1,0 +1,648 @@
+# Multi-Screen PiKVM Desktop Client — Design
+
+**Status:** pre-implementation design, coordinate model empirically verified
+**Target platform:** Kubuntu 24.04+ (KDE Plasma 6.x, Wayland)
+**Target laptop OS:** Ubuntu / Linux
+
+## 1. Goal
+
+A native Linux application that replaces the pattern of multiple Chrome
+tabs pointed at multiple PiKVM web UIs. The application presents **N
+independently movable and resizable windows, one per PiKVM**, each
+rendering a remote target monitor live. A single physical keyboard and
+mouse are shared between the windows via click-to-capture with a release
+hotkey. On KDE, the windows pinned to one virtual desktop make the remote
+screens feel like any other KDE workspace.
+
+`N` is configuration-driven. Current target use cases are N=2 and N=3,
+but nothing in the architecture assumes a specific count.
+
+## 2. Setup being solved for
+
+* One **target** laptop with its own USB HID input and multiple HDMI
+  outputs (e.g. one from the laptop body, two from a dock).
+* **N PiKVMs**, each receiving one of the target's HDMI outputs.
+* All target HDMI outputs form a single extended logical desktop on the
+  target (not mirrored, not separate X/Wayland seats).
+* The **client** is a Linux workstation running Kubuntu 24.04+ with one
+  or more local physical monitors (local/target layouts need not match).
+
+Validated configurations:
+
+| N | Target HDMI sources | PiKVMs | Use case |
+|---|---|---|---|
+| 2 | laptop + 1 dock output | 2 | current minimum-viable setup |
+| 3 | laptop + 2 dock outputs | 3 | stated goal |
+
+## 3. The core constraint
+
+PiKVM emulates a standard USB HID absolute mouse. When the target OS
+receives an absolute HID coordinate, it maps the full coordinate range
+across its **entire logical desktop** — not per-HDMI-output, not per
+monitor. This was confirmed by PiKVM issue #1070 (two PiKVMs on one
+target in absolute mode cannot pass the cursor seamlessly between
+monitors) and by issue #1373 (feature request to allow per-PiKVM custom
+mouse resolution, still open).
+
+Target-side remapping (Wacom-style per-device monitor mapping via
+libinput calibration matrices) exists in theory on KDE Plasma but is
+only exposed in the UI for devices identified by libinput as graphics
+tablets. PiKVM presents as a generic USB HID mouse, not a tablet, so
+the Tablet KCM doesn't apply. Hand-rolled udev rules plus libinput
+configuration could achieve the mapping but are fragile across upgrades
+and all PiKVMs share the same device name ("PiKVM"), requiring USB-path
+matching.
+
+**Conclusion:** the coordinate math must live in the client, not rely on
+target-side per-device remapping.
+
+## 4. Architecture — Option A: one HID master, N−1 video-only
+
+### 4.1 Physical topology
+
+* **PiKVM A** — HDMI in from target monitor 1, USB HID **connected**
+  to target. This is the **HID master**. All input (keyboard, mouse)
+  flows through this PiKVM regardless of which local window is
+  captured.
+* **PiKVM B..N** — HDMI in from target monitors 2..N, USB HID
+  **disconnected** (either unplugged, or HID gadget disabled in
+  `/etc/kvmd/override.yaml`). Video-only.
+
+The HID master is a config choice; it's typically the PiKVM plugged
+into the most stable USB port on the target (laptop body rather than
+dock).
+
+### 4.2 Why one HID master
+
+* Only one physical USB HID means only one input device contending for
+  the cursor on the target — simpler, predictable.
+* All PiKVMs in absolute mode would map to the same logical desktop;
+  extra HID channels buy no coordinate-space independence, only
+  potential failover.
+* Keyboard input has no per-monitor concept, so routing keyboard
+  per-window is meaningless. One HID master handles it uniformly.
+
+### 4.3 PiKVM-side configuration
+
+On the N−1 video-only PiKVMs, disable the HID gadget via
+`/etc/kvmd/override.yaml`:
+
+```yaml
+kvmd:
+    hid:
+        keyboard:
+            device: ""
+        mouse:
+            device: ""
+```
+
+Or simply leave the OTG USB cable to the target unplugged. Same effect.
+
+On the HID master PiKVM, leave the default absolute-mode USB HID
+configuration. Verify `mouse.absolute == true` in `/api/hid` at
+startup.
+
+## 5. Coordinate model
+
+Each local window represents one target monitor. Windows are free to be
+anywhere on the local desktop, any size, including all-on-one-local-monitor
+or overlapping. The transform is **window-local**, not local-screen-local.
+
+### 5.1 Configuration inputs
+
+* **Target logical desktop**: total width and height in pixels, e.g.
+  3840 × 1080 (N=2, two 1920×1080 monitors side by side) or
+  5760 × 1080 (N=3, three 1920×1080 monitors side by side).
+* **Target monitor rects** within that desktop (see §8 for schema).
+* **Window → target monitor mapping**: which local window represents
+  which target monitor.
+* **Letterbox rect** per window: the sub-region of the window that
+  currently holds video (after aspect-ratio fit). Cursor is only
+  mapped from inside this rect; outside, cursor sits at the nearest
+  letterbox edge.
+
+### 5.2 Transform (empirically verified)
+
+Let the captured window be W, mapped to target monitor i. Let V be the
+letterbox video rect inside W. Let (sx, sy) be the local cursor position
+in local screen coordinates.
+
+```
+# 1. Local cursor relative to window origin
+wx = sx - W.x
+wy = sy - W.y
+
+# 2. Clamp to letterbox (cursor at letterbox edge if outside)
+vx = clamp(wx - V.x, 0, V.w)
+vy = clamp(wy - V.y, 0, V.h)
+
+# 3. Normalize within letterbox: nx, ny in [0.0, 1.0]
+nx = vx / V.w
+ny = vy / V.h
+
+# 4. Map to target monitor pixel coords
+tx_px = monitor[i].origin.x + nx * monitor[i].size.w
+ty_px = monitor[i].origin.y + ny * monitor[i].size.h
+
+# 5. Map target pixel coords to PiKVM API coord space.
+#    PiKVM API uses signed s16 [-32768, 32767] with (0, 0) at the
+#    CENTER of the target's combined logical desktop. Linear mapping,
+#    verified empirically (see §10.1).
+to_x = clamp(round((tx_px / desktop.w - 0.5) * 65535), -32768, 32767)
+to_y = clamp(round((ty_px / desktop.h - 0.5) * 65535), -32768, 32767)
+
+# 6. Send via POST /api/hid/events/send_mouse_move?to_x=...&to_y=...
+#    or via the WebSocket event channel (preferred for latency).
+```
+
+Worked example (N=2, desktop 3840×1080):
+
+| Target pixel | → API coord |
+|---|---|
+| `(0, 0)` top-left | `(-32768, -32768)` |
+| `(3840, 1080)` bottom-right | `(32767, 32767)` |
+| `(1920, 540)` dead center | `(0, 0)` |
+| `(2880, 540)` center of monitor 2 | `(16383, 0)` |
+
+### 5.3 Window-switching behavior
+
+Because the UX is click-to-capture + release hotkey, cursor transitions
+between windows are discrete: release current capture, move local
+cursor, click new window, capture begins. The target cursor visibly
+teleports at each new capture — this is inherent to Option A with
+independent window layouts and is acceptable.
+
+Keyboard events while captured always go to the HID master, regardless
+of which window is captured. Mouse events use the captured window's
+coordinate transform but still output via the HID master.
+
+## 6. Component architecture (Qt6)
+
+```
+Main thread (QApplication)
+├── KvmWindow × N  (QMainWindow subclass, one per target monitor)
+│   ├── VideoSurface (QVideoWidget fed by GStreamer sink)
+│   ├── Click-to-capture handler (mousePressEvent)
+│   ├── Release hotkey (QShortcut, app-local)
+│   └── Wayland pointer constraint on capture
+├── InputRouter
+│   ├── Tracks captured window / target monitor
+│   └── Forwards events to CoordTransform + HidSink
+├── CoordTransform
+│   ├── Stateful with window rects, letterbox rects, target layout
+│   └── Pure function: (local cursor, captured window) -> (to_x, to_y)
+└── HidSink
+    ├── Writes to HID master's outgoing WebSocket
+    └── Optional REST fallback if WS disconnected
+
+Worker threads (QThread × N, one per PiKVM)
+├── PiKvmClient
+│   ├── HTTPS session (QNetworkAccessManager + cookie jar)
+│   ├── /api/ws state WebSocket (incoming state events)
+│   ├── /api/media/ws?video=h264 video WebSocket
+│   └── Outgoing HID event sender (only active on HID master)
+└── VideoPipeline (GStreamer, per PiKVM)
+    ├── appsrc (fed from video WebSocket thread)
+    ├── h264parse
+    ├── vah264dec (preferred) | avdec_h264 (fallback)
+    ├── videoconvert
+    └── qtvideosink -> KvmWindow's VideoSurface
+```
+
+Scaling from N=2 → N=3 → N=M is a config change. The only code path
+that iterates on N is startup (spawn M windows + M clients + M video
+pipelines, wire them into the InputRouter). All per-event logic is
+parameterized.
+
+## 7. Tech stack
+
+| Concern | Choice | Notes |
+|---|---|---|
+| UI framework | Qt 6.7+ (C++) | KDE-native, fastest to ship |
+| Video decode | GStreamer 1.24 via QtMultimedia | `vah264dec` for VA-API, auto-selected |
+| Video transport | H.264 over WebSocket (`/api/media/ws?video=h264`) | Avoids WebRTC/Janus complexity |
+| HTTP/WS | Qt's QNetworkAccessManager + QWebSocket | In-tree, no extra deps |
+| Config | YAML via `yaml-cpp` | Hand-editable |
+| Packaging | `.deb` built with `nfpm` | Matches existing Jenkins/multi-format workflow |
+| Build system | CMake | Qt6 convention |
+
+### 7.1 Required Ubuntu packages
+
+```
+qt6-base-dev qt6-multimedia-dev qt6-websockets-dev
+libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+gstreamer1.0-vaapi   # or the equivalent for the `va` plugin
+va-driver-all        # or intel-media-va-driver-non-free / mesa-va-drivers
+libyaml-cpp-dev
+```
+
+### 7.2 VA-API verification
+
+```bash
+gst-inspect-1.0 vah264dec   # should print element details
+vainfo                      # should list H.264 decode profiles
+```
+
+To force VA-API over software decode at runtime:
+
+```bash
+export GST_PLUGIN_FEATURE_RANK=vah264dec:MAX
+```
+
+## 8. Configuration schema (YAML)
+
+The schema is list-based; N is defined implicitly by the length of
+`target.monitors`, which must equal the length of the configured
+`windows` (one window per target monitor). Startup validates this.
+
+```yaml
+# ~/.config/pikvm-desktop/config.yaml
+
+target:
+  # Total combined logical desktop.
+  logical_desktop:
+    width: 3840           # example for N=2
+    height: 1080
+
+  # One entry per target monitor. Length defines N.
+  monitors:
+    - id: 1
+      origin: [0, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.71
+    - id: 2
+      origin: [1920, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.72
+    # For N=3, add:
+    # - id: 3
+    #   origin: [3840, 0]
+    #   size: [1920, 1080]
+    #   pikvm: 192.168.1.73
+
+# Exactly one PiKVM in target.monitors must also be hid_master.
+hid_master: 192.168.1.71
+
+auth:
+  # Per-PiKVM auth. TOTP optional; if configured, the 2FA code is
+  # concatenated onto the password at request time.
+  192.168.1.71:
+    user: admin
+    password_ref: secret://pikvm-1-passwd
+    totp_secret_ref: secret://pikvm-1-totp   # optional
+  192.168.1.72:
+    user: admin
+    password_ref: secret://pikvm-2-passwd
+
+release_hotkey: "Ctrl+Alt+Shift+Escape"
+
+video:
+  prefer_hw_decode: true    # VA-API; software fallback on init failure
+  target_fps: 60
+
+# One entry per target monitor; target_monitor must reference an id in
+# target.monitors. Length must equal length of target.monitors.
+windows:
+  - target_monitor: 1
+    geometry: { x: 0, y: 0, w: 960, h: 540 }
+  - target_monitor: 2
+    geometry: { x: 960, y: 0, w: 960, h: 540 }
+```
+
+Password and TOTP secrets should be loaded via KWallet or libsecret,
+not inlined in the config. `secret://` indirections are placeholders
+for that lookup.
+
+### 8.1 Startup validation
+
+The application rejects a config with:
+
+* `len(target.monitors) != len(windows)`
+* any `window.target_monitor` not referencing an existing
+  `target.monitors[].id`
+* `hid_master` not matching any `target.monitors[].pikvm`
+* any `target.monitors[]` rect extending outside `logical_desktop`
+* overlapping `target.monitors[]` rects (probably user error)
+
+## 9. Phase plan
+
+### Phase 0 — Empirical verification ✓ COMPLETE
+Verified coordinate range and mapping via `pikvm_coord_verify.py`.
+Results recorded in §10.
+
+### Phase 1 — PiKVM client skeleton (1–2 days)
+One `PiKvmClient` QThread class. HTTPS auth, state WebSocket, basic
+request/response for HID events. No video yet. Validates auth,
+session cookie flow, 2FA concatenation, WebSocket keepalive.
+
+### Phase 2 — GStreamer video pipeline (1 day)
+H.264 over WebSocket into `appsrc`, through
+`h264parse ! vah264dec ! videoconvert ! qtvideosink`, rendered into
+a `QVideoWidget`. Measure end-to-end latency (target displays a
+clock, compare frame to wall clock).
+
+### Phase 3 — Single-window capture & input (1 day)
+One window, click-to-capture, release hotkey, mouse + keyboard routing
+via the coord transform. Prove the full end-to-end loop with the HID
+master.
+
+### Phase 4 — N windows + config (1 day)
+Load YAML config, spawn N windows, InputRouter routes through the
+HID-master client. Validate with N=2, then test N=3 expansion as a
+pure config change (no code changes).
+
+### Phase 5 — Letterboxing + aspect ratio (half a day)
+Maintain video rect inside each window. Coord transform uses
+letterbox rect, not window rect. Aspect ratio mismatch no longer
+distorts cursor motion.
+
+### Phase 6 — Reliability (1 day)
+PiKVM disconnects/reconnects, video stall recovery, auth token
+refresh. Graceful degradation of display when video is unavailable.
+
+### Phase 7 — Polish
+Persist window positions, cleanup on exit, logging, systemd
+user-service unit. Menu items for common PiKVM actions (reboot
+target, open MSD upload, etc.) as additive features.
+
+### Out of scope for v1
+* Clipboard sync between local and target.
+* Audio (microphone to target, speaker from target).
+* MSD / virtual media upload (trivial to add later via existing API).
+* ATX power control (trivial to add later).
+* Macro keypad integration — planned but separate; v1 will expose a
+  local IPC socket (Unix domain socket) that the keypad daemon can
+  send HID events into.
+
+## 10. Empirical verifications
+
+### 10.1 Coordinate range and origin (verified 2026-04-25)
+
+PiKVM used: `192.168.1.71`. Target: laptop with 2 HDMI outputs, combined
+logical desktop 3840 × 1080. Observed via `evtest` on the target and
+visual confirmation of cursor position.
+
+| API call | Wire `ABS_X, ABS_Y` | Visual result |
+|---|---|---|
+| `(0, 0)` | `16383, 16383` | center of combined desktop |
+| `(32767, 0)` | `32767, 16383` | right edge, vertical center |
+| `(-32768, 0)` | `0, 16383` | left edge, vertical center |
+| `(0, 32767)` | `16383, 32767` | horizontal center, bottom edge |
+| `(0, -32768)` | `16383, 0` | horizontal center, top edge |
+| `(-32768, -32768)` | `0, 0` | top-left of monitor 1 |
+| `(32767, 32767)` | `32767, 32767` | bottom-right of combined desktop (off-screen in visible windows) |
+| `(16384, 16384)` | `24575, 24575` | 75% across, 75% down (linearity confirmed) |
+| `(-16384, -16384)` | `8191, 8191` | 25% across, 25% down (linearity confirmed) |
+| `(65535, 0)` | `32767, 16383` | clamped to `(32767, 0)` |
+| `(-65536, 0)` | `0, 16383` | clamped to `(-32768, 0)` |
+
+**Wire relationship**: `wire = (api + 32768) / 2`. The HID descriptor
+uses a 15-bit unsigned logical range, effectively halving the API's
+signed s16 range on the wire. For client purposes this is transparent
+— we work entirely in API coords.
+
+**Conclusions**:
+* API range: signed s16 `[-32768, 32767]` on both axes.
+* `(0, 0)` is the **center** of the target's combined logical desktop.
+* Mapping is linear and spans the full multi-monitor desktop.
+* Values outside `[-32768, 32767]` are silently clamped by the API.
+* Step `(16384, 0)` separately verified to land at the center of the
+  right-hand monitor, confirming full-desktop spanning.
+
+### 10.2 Video latency — TBD (Phase 2)
+* H.264 over WebSocket end-to-end latency (clock-on-screen test):
+  _____________________ ms
+* VA-API decode confirmed active (via `GST_DEBUG=4` or `gst-inspect`):
+  _____________________
+* Software decode latency (for comparison):
+  _____________________ ms
+
+### 10.3 Qt Wayland pointer constraint — TBD (Phase 3)
+* Capture/release cycle reliable on Plasma 6.x:
+  _____________________
+* Compositor spontaneously releases grab under any condition?
+  _____________________
+
+### 10.4 WebSocket event formats (verified 2026-04-25)
+
+Established by two tiers of evidence: (a) a read of kvmd HEAD
+(`kvmd/apps/kvmd/api/hid.py`, `kvmd/validators/hid.py`, `kvmd/mouse.py`,
+`kvmd/htserver.py`, `web/share/js/kvm/{session,mouse,keyboard,hid}.js`),
+and (b) empirical capture from a live Glasshouse CLI session against
+two real PiKVMs (kvmd 3.106 and 3.199) logging every received text
+frame. Tier (b) overrode tier (a) wherever they disagreed — `session.js`
+has an abstraction layer above the wire format that normalised event
+names, which misled the initial source-only investigation.
+
+Full schemas are recorded in §13.4 (outgoing HID events) and §13.2
+(incoming state events). Findings worth calling out:
+
+* `mouse_move` event wraps coords in a nested `to` object —
+  `{"event": {"to": {"x": X, "y": Y}}}`. It does **not** use flat
+  `to_x`/`to_y` keys as the REST query-string form suggests.
+* State-event `event_type` strings carry the `_state` suffix on the
+  wire (`hid_state`, `atx_state`, `streamer_state`, etc.), plus
+  `gpio_model_state`, `hid_keymaps_state`, `streamer_ocr_state`, and
+  per-subsystem `info_*_state` splits (`info_auth_state`,
+  `info_extras_state`, `info_fan_state`, `info_hw_state`,
+  `info_meta_state`, `info_system_state`). `session.js` dispatches on
+  normalised *bare* names, so reading only the JS gave a wrong picture.
+* The initial burst terminates with a `loop` event (empty `event`
+  object). This is the correct ready-for-use marker for a new session.
+* Server periodic broadcasts (`info_fan_state`, etc.) are sent to all
+  connected clients and can arrive on a freshly-opened WS before its
+  own initial burst starts, so the first event received is **not**
+  reliably the start of this session's burst. Only `loop` is reliable.
+* There is **no `shortcut` event on the WS**. Shortcuts must be
+  synthesised client-side as an ordered `key` press/release sequence
+  (matches the reference web UI).
+* Malformed or out-of-schema WS frames are **silently dropped** by the
+  server — no ack, no error response. Plan for "send and hope" on the
+  HID path. Numeric out-of-range is clamped (same as REST).
+* The server accepts `{"event_type": "ping", "event": {}}` and replies
+  with `{"event_type": "pong", "event": {}}`. Independent of the WS
+  protocol ping; proves the aiohttp JSON handler is alive. The client
+  pings every 15 s while the WS is open.
+
+## 11. Risks and mitigations
+
+| Risk | Status | Mitigation |
+|---|---|---|
+| PiKVM coord range differs from assumed s16 | **resolved** | Verified empirically in §10.1 |
+| H.264-over-WS latency too high | open | Fall back to WebRTC (Janus) in Phase 2 if > 150ms |
+| KDE Wayland grab quirks | open | App-local hotkey avoids global-shortcut issues; test on real hardware in Phase 3 |
+| HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
+| Dock disconnect re-orders target monitors | open | Calibration flow or manual reassignment in config |
+| Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
+
+## 12. References
+
+* PiKVM handbook: <https://docs.pikvm.org/>
+* PiKVM HTTP API: <https://docs.pikvm.org/api/>
+* kvmd source: <https://github.com/pikvm/kvmd>
+* ustreamer: <https://github.com/pikvm/ustreamer>
+* Relevant issues:
+  * #1070 — two PiKVMs, absolute mode across monitors
+  * #1373 — custom mouse resolution request
+  * #1017 — multi-monitor consolidation
+* GStreamer `va` plugin:
+  <https://gstreamer.freedesktop.org/documentation/va/>
+* Qt6 QtMultimedia GStreamer backend:
+  <https://doc.qt.io/qt-6/qtmultimedia-gstreamer.html>
+
+## 13. Appendix — PiKVM API subset
+
+Only the handles this client depends on:
+
+### 13.1 Authentication
+* `POST /api/auth/login` — form body `user=...&passwd=...`; returns
+  `Set-Cookie: auth_token=...`.
+* Header alternative: `X-KVMD-User`, `X-KVMD-Passwd` on every request.
+* 2FA: concatenate TOTP onto password (no separator).
+
+### 13.2 State
+* `GET /api/info?fields=hw,system,meta` — platform identification.
+* `GET /api/hid` — current HID state; verify `mouse.absolute == true`
+  on the HID master at startup.
+* `WSS /api/ws?stream=0` — state event stream; `stream=0` means "do
+  not count me toward the video client count". The initial burst emits
+  one broadcast per subsystem, all with `_state`-suffixed event types
+  — `hid_state`, `atx_state`, `msd_state`, `streamer_state`,
+  `gpio_state`, `gpio_model_state`, `hid_keymaps_state`,
+  `streamer_ocr_state`, `info_auth_state`, `info_extras_state`,
+  `info_fan_state`, `info_hw_state`, `info_meta_state`,
+  `info_system_state` — and terminates with a `loop` event (empty
+  `event` object). Subsequent events reuse the same event-type strings
+  and carry deltas. Server periodic broadcasts (e.g. `info_fan_state`
+  every few seconds) may arrive interleaved with a fresh session's
+  initial burst, so do not assume a session's first event on the stream
+  is the start of *its* burst. Verified empirically 2026-04-25 against
+  kvmd 3.106 and 3.199; see §10.4.
+
+### 13.3 HID input
+* `POST /api/hid/events/send_mouse_move?to_x=X&to_y=Y` — absolute
+  move. Accepts signed s16 `[-32768, 32767]` for both axes; `(0, 0)`
+  is the center of the target's combined logical desktop. Values
+  outside range are silently clamped.
+* `POST /api/hid/events/send_mouse_button?button=left&state=1` —
+  button state change. Buttons: `left`, `middle`, `right`, `up`,
+  `down`.
+* `POST /api/hid/events/send_mouse_wheel?delta_x=0&delta_y=N` —
+  wheel scroll.
+* `POST /api/hid/events/send_key?key=KeyA&state=1&finish=1` — single
+  key with auto-release safety via `finish=1`.
+* `POST /api/hid/events/send_shortcut?keys=ControlLeft,KeyC` — chord.
+* Key names come from the `web_name` column of `kvmd/keymap.csv`,
+  matching MDN `KeyboardEvent.code` values.
+
+### 13.4 WebSocket input (lower latency than REST)
+
+Sent as **TEXT** frames on the same `/api/ws?stream=0` connection used
+for state. (The server also accepts BINARY frames with per-event
+opcodes — the PiKVM web UI uses binary; we use TEXT for readability.)
+Validated at HEAD of `pikvm/kvmd` on 2026-04-25 against
+`kvmd/apps/kvmd/api/hid.py`, `kvmd/validators/hid.py`, `kvmd/mouse.py`,
+`kvmd/htserver.py`, and `web/share/js/kvm/{session,mouse,keyboard}.js`.
+
+All frames share the envelope `{"event_type": <str>, "event": <obj>}`.
+The server **silently drops** malformed, out-of-schema, or unknown
+events — there is no ack or error response on the WS path. Numeric
+values outside the accepted ranges are **clamped**, not rejected
+(matching the REST endpoints).
+
+#### `key`
+
+```json
+{"event_type": "key", "event": {"key": "Enter", "state": true, "finish": false}}
+```
+
+* `key` — string, case-sensitive DOM `KeyboardEvent.code` value
+  (`"KeyA"`, `"ControlLeft"`, `"F1"`, ...). Source of truth is the
+  `WEB_TO_EVDEV` table in `kvmd/keyboard/mappings.py`.
+* `state` — bool; `true` = pressed, `false` = released.
+* `finish` — bool, optional (default `false`). Bad-link safety: when
+  `true`, the HID plugin auto-releases non-modifier keys immediately
+  after the press. Same semantics as `finish=1` on the REST endpoint.
+
+#### `mouse_button`
+
+```json
+{"event_type": "mouse_button", "event": {"button": "left", "state": true}}
+```
+
+* `button` — one of `"left"`, `"right"`, `"middle"`, `"up"`, `"down"`.
+  `"up"` / `"down"` are the 4th/5th buttons (browser back/forward),
+  **not** wheel directions.
+* `state` — bool. Press and release are two separate events; the WS
+  has no auto-release helper (unlike the REST endpoint, which
+  synthesises click-and-release when `state` is omitted).
+
+#### `mouse_move` (absolute)
+
+```json
+{"event_type": "mouse_move", "event": {"to": {"x": 0, "y": 0}}}
+```
+
+* `to.x`, `to.y` — signed s16 `[-32768, 32767]`. Same coord space as
+  the REST `send_mouse_move` endpoint (§5.2, §10.1). Note the nested
+  `to` object — this differs from the REST query-string form
+  `?to_x=X&to_y=Y`.
+* Independent of `mouse_button`; no prior press required.
+* If the active HID output is not absolute-mode, the move is silently
+  ignored by the plugin layer (no WS-level check).
+
+#### `mouse_relative`
+
+```json
+{"event_type": "mouse_relative",
+ "event": {"delta": {"x": 3, "y": -2}, "squash": false}}
+```
+
+Batched form (one gadget report per axis, not one per delta):
+
+```json
+{"event_type": "mouse_relative",
+ "event": {"delta": [{"x": 3, "y": -2}, {"x": 1, "y": 0}], "squash": true}}
+```
+
+* `delta` — either an object `{x, y}` or a list of them. Each
+  component is signed s8 `[-127, 127]`, clamped.
+* `squash` — bool, optional (default `false`). WS-only batching hint.
+
+#### `mouse_wheel`
+
+Same payload shape as `mouse_relative`; only `event_type` differs and
+the server routes it to a different HID method.
+
+```json
+{"event_type": "mouse_wheel", "event": {"delta": {"x": 0, "y": -5}}}
+```
+
+Sign convention follows the reference UI: scrolling the wheel away
+from the user yields **positive** Y, scrolling left yields positive X.
+
+#### No `shortcut` event on the WS
+
+The REST `POST /api/hid/events/send_shortcut?keys=...` has no WS
+equivalent. This client (and the reference UI) synthesises shortcuts
+by emitting `key` events: press all keys in order, then release in
+reverse. See `PiKvmClient::sendShortcut`.
+
+#### kvmd-level keepalive
+
+```json
+// client -> server
+{"event_type": "ping", "event": {}}
+// server -> client
+{"event_type": "pong", "event": {}}
+```
+
+Independent of the WS-protocol ping frame. Exercises the aiohttp JSON
+handler, so a pong proves end-to-end kvmd liveness, not just TCP/WS
+framing. The client sends one every 15 s while the WS is open.
+
+### 13.5 Video
+* `WSS /api/media/ws?video=h264` — raw H.264 NAL units streamed over
+  WebSocket. Feed directly into GStreamer `appsrc` with caps
+  `video/x-h264, stream-format=byte-stream, alignment=au`.
