@@ -23,11 +23,17 @@ struct WindowSpec {
     QRect geometry;
 };
 
+enum class VideoTransport {
+    Janus,   // PiKVM 4 / firmware with H.264 over WebRTC at /janus/ws
+    Mjpeg,   // PiKVM 3 / older firmware: MJPEG via GET /streamer/stream
+};
+
 struct AuthSpec {
-    QString user;
-    QString password_ref;
-    QString totp_secret_ref;   // may be empty
-    bool    insecure_tls = false;
+    QString        user;
+    QString        password_ref;
+    QString        totp_secret_ref;   // may be empty
+    bool           insecure_tls = false;
+    VideoTransport transport    = VideoTransport::Janus;
 };
 
 struct VideoSpec {

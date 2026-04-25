@@ -46,6 +46,11 @@ public:
     bool     isConnected() const;
     HidState lastHidState() const { return m_hid; }
 
+    // Full Cookie-header value (`auth_token=...`) for reuse on sibling
+    // sockets (e.g. Janus `/janus/ws`). Empty until authenticated() fires.
+    QString  authCookieHeader() const { return m_authCookie; }
+    bool     insecureTls() const { return m_opts.insecure_tls; }
+
     // HID senders. All ride on the state WebSocket (same connection used for
     // incoming events). If the WS is not open, the event is dropped with a
     // warning log — there is no REST fallback in Phase 1.

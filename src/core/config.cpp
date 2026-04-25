@@ -158,6 +158,16 @@ ConfigResult loadConfig(const QString& path) {
             as.password_ref    = yamlString(spec, "password_ref");
             as.totp_secret_ref = yamlString(spec, "totp_secret_ref");
             as.insecure_tls    = yamlScalarOr<bool>(spec, "insecure_tls", false);
+            const QString tx   = yamlString(spec, "transport");
+            if (tx.isEmpty() || tx == QLatin1String("janus")) {
+                as.transport = VideoTransport::Janus;
+            } else if (tx == QLatin1String("mjpeg")) {
+                as.transport = VideoTransport::Mjpeg;
+            } else {
+                result.errors.append(QStringLiteral(
+                    "auth['%1'].transport='%2' is not 'janus' or 'mjpeg'")
+                    .arg(host, tx));
+            }
             cfg.auth.insert(host, as);
         }
     }

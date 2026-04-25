@@ -147,9 +147,13 @@ ty_px = monitor[i].origin.y + ny * monitor[i].size.h
 # 5. Map target pixel coords to PiKVM API coord space.
 #    PiKVM API uses signed s16 [-32768, 32767] with (0, 0) at the
 #    CENTER of the target's combined logical desktop. Linear mapping,
-#    verified empirically (see §10.1).
-to_x = clamp(round((tx_px / desktop.w - 0.5) * 65535), -32768, 32767)
-to_y = clamp(round((ty_px / desktop.h - 0.5) * 65535), -32768, 32767)
+#    verified empirically (see §10.1). Round-before-bias keeps the
+#    endpoints (0, center, max) on exact integers and the mapping
+#    monotonic; the equivalent-looking (f − 0.5) × 65535 form rounds
+#    the *wrong* side of the bias and introduces off-by-one errors at
+#    25% / 75% of each axis.
+to_x = clamp(round(tx_px / desktop.w * 65535) - 32768, -32768, 32767)
+to_y = clamp(round(ty_px / desktop.h * 65535) - 32768, -32768, 32767)
 
 # 6. Send via POST /api/hid/events/send_mouse_move?to_x=...&to_y=...
 #    or via the WebSocket event channel (preferred for latency).
@@ -198,13 +202,18 @@ Main thread (QApplication)
 Worker threads (QThread × N, one per PiKVM)
 ├── PiKvmClient
 │   ├── HTTPS session (QNetworkAccessManager + cookie jar)
-│   ├── /api/ws state WebSocket (incoming state events)
-│   ├── /api/media/ws?video=h264 video WebSocket
+│   ├── /api/ws state WebSocket (incoming state events, HID output)
 │   └── Outgoing HID event sender (only active on HID master)
+├── JanusClient
+│   ├── /janus/ws signalling WebSocket (subprotocol janus-protocol)
+│   ├── info → create → attach(janus.plugin.ustreamer) → watch
+│   ├── SDP offer in; answer out; keepalive every 30 s
+│   └── Auth via the kvmd auth_token cookie from PiKvmClient
 └── VideoPipeline (GStreamer, per PiKVM)
-    ├── appsrc (fed from video WebSocket thread)
-    ├── h264parse
-    ├── vah264dec (preferred) | avdec_h264 (fallback)
+    ├── webrtcbin (terminates the WebRTC peer, DTLS/SRTP/ICE)
+    ├── rtph264depay (built dynamically on pad-added)
+    ├── h264parse config-interval=-1
+    ├── nvh264dec | vah264dec | avdec_h264
     ├── videoconvert
     └── qtvideosink -> KvmWindow's VideoSurface
 ```
@@ -220,7 +229,7 @@ parameterized.
 |---|---|---|
 | UI framework | Qt 6.7+ (C++) | KDE-native, fastest to ship |
 | Video decode | GStreamer 1.24 via QtMultimedia | `vah264dec` for VA-API, auto-selected |
-| Video transport | H.264 over WebSocket (`/api/media/ws?video=h264`) | Avoids WebRTC/Janus complexity |
+| Video transport | H.264 over WebRTC via Janus (`/janus/ws`, plugin `janus.plugin.ustreamer`) | The only H.264 path stock PiKVM exposes; see §10.5 |
 | HTTP/WS | Qt's QNetworkAccessManager + QWebSocket | In-tree, no extra deps |
 | Config | YAML via `yaml-cpp` | Hand-editable |
 | Packaging | `.deb` built with `nfpm` | Matches existing Jenkins/multi-format workflow |
@@ -232,6 +241,9 @@ parameterized.
 qt6-base-dev qt6-multimedia-dev qt6-websockets-dev
 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+gstreamer1.0-nice    # libnice wrapper — webrtcbin's ICE backend;
+                     # without it, pipelines containing webrtcbin
+                     # fail state-change to PLAYING
 gstreamer1.0-vaapi   # or the equivalent for the `va` plugin
 va-driver-all        # or intel-media-va-driver-non-free / mesa-va-drivers
 libyaml-cpp-dev
@@ -465,12 +477,60 @@ Full schemas are recorded in §13.4 (outgoing HID events) and §13.2
   protocol ping; proves the aiohttp JSON handler is alive. The client
   pings every 15 s while the WS is open.
 
+### 10.5 Video transport: Janus/WebRTC (verified 2026-04-25)
+
+The previous draft of this section described a raw-H.264-over-WebSocket
+transport via `kvmd-media` at `/api/media/ws`. That turned out to be
+wrong in practice: stock PiKVM firmware does not install `kvmd-media`,
+so `/api/media/ws` returns HTTP 404 on the upgrade. The only H.264 path
+exposed by a stock PiKVM is the Janus WebRTC gateway at `/janus/ws`,
+which is also what the reference web UI uses. This client now targets
+that path exclusively.
+
+* Endpoint: `WSS /janus/ws`. WebSocket subprotocol **`janus-protocol`**
+  — must be offered on the upgrade via `Sec-WebSocket-Protocol`, or the
+  server rejects the handshake. Auth: the same `auth_token` cookie kvmd
+  issues for `/api/ws`; shared across both sockets from a single login.
+* Signalling is the standard Janus JSON-RPC flow:
+  `info → create → attach(janus.plugin.ustreamer) → message{request:"watch"}`.
+  The plugin replies with an async `event` carrying a JSEP SDP offer.
+  Client answers with `message{request:"start"}` and the JSEP answer.
+  `{"janus":"keepalive", session_id:S}` every 30 s (Janus defaults to a
+  60 s session-inactivity timeout).
+* Plugin name is `janus.plugin.ustreamer` on stock PiKVM. A single
+  `{"janus":"info"}` request returns the plugin registry, so the probe
+  (`bin/glasshouse-janusprobe`) logs the full list — if a variant image
+  ships a different name, it's trivial to adjust.
+* ICE is **vanilla** (not trickle): the offer includes all candidates
+  inline with `a=end-of-candidates`. On our side, we defer emitting the
+  answer until webrtcbin's `ice-gathering-state` transitions to
+  `COMPLETE`, then send the final SDP (with our gathered candidates) in
+  a single `start` message.
+* Media arrives as a single RTP H.264 track (BUNDLE-max-bundle). The
+  decode chain hangs off `webrtcbin`'s `pad-added` signal:
+  `queue ! rtph264depay ! h264parse config-interval=-1 ! <decoder> !
+  videoconvert ! video/x-raw,format=BGRA ! appsink`. `config-interval=-1`
+  re-inserts SPS/PPS before every IDR so decoders that lose their
+  stream header on concealment still recover.
+* If you see "probe received SDP offer then the server closed" during
+  the signalling probe: normal. The ustreamer plugin drops handles that
+  never answer. The viewer path answers promptly, so the session stays
+  live.
+* Sources of truth (both checked 2026-04-25, no docs.pikvm.org coverage):
+  * `pikvm/ustreamer` — `janus/src/plugin.c` for the plugin's accepted
+    request verbs (`watch`, `start`, `stop`).
+  * `pikvm/kvmd` — `web/share/js/kvm/stream_janus.js` for the UI's
+    signalling order.
+  Both are private-but-stable protocols; check those files first if
+  the session starts refusing the configured plugin or the offer shape
+  changes.
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
 |---|---|---|
 | PiKVM coord range differs from assumed s16 | **resolved** | Verified empirically in §10.1 |
-| H.264-over-WS latency too high | open | Fall back to WebRTC (Janus) in Phase 2 if > 150ms |
+| WebRTC negotiation latency | open | Measure auth-to-first-frame; if ICE gathering dominates, set `stun-server=NULL` on webrtcbin for LAN-only deployments |
 | KDE Wayland grab quirks | open | App-local hotkey avoids global-shortcut issues; test on real hardware in Phase 3 |
 | HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
 | Dock disconnect re-orders target monitors | open | Calibration flow or manual reassignment in config |
@@ -642,7 +702,97 @@ Independent of the WS-protocol ping frame. Exercises the aiohttp JSON
 handler, so a pong proves end-to-end kvmd liveness, not just TCP/WS
 framing. The client sends one every 15 s while the WS is open.
 
-### 13.5 Video
-* `WSS /api/media/ws?video=h264` — raw H.264 NAL units streamed over
-  WebSocket. Feed directly into GStreamer `appsrc` with caps
-  `video/x-h264, stream-format=byte-stream, alignment=au`.
+### 13.5 Video — Janus/WebRTC
+
+PiKVM ships a Janus Gateway fronted by nginx at `/janus/ws`, with the
+`janus.plugin.ustreamer` plugin bridging ustreamer's H.264 output into
+an RTP+SRTP WebRTC track. This is the only H.264 transport exposed by
+stock firmware. The handbook at docs.pikvm.org does not document it;
+sources of truth are `pikvm/ustreamer/janus/src/plugin.c` and
+`pikvm/kvmd/web/share/js/kvm/stream_janus.js` (both checked 2026-04-25).
+
+* Endpoint: `WSS /janus/ws`.
+* Subprotocol: `Sec-WebSocket-Protocol: janus-protocol` is **required**
+  on the upgrade. QWebSocket exposes this via
+  `QWebSocketHandshakeOptions::setSubprotocols`.
+* Authentication: the kvmd `auth_token` cookie (same cookie `/api/ws`
+  uses). No separate Janus `api_secret` is required on stock PiKVM —
+  nginx gates the path before Janus sees it.
+
+Signalling transactions used (all JSON over the same WS):
+
+1. Client → server, TEXT (discovery; optional but cheap):
+
+   ```json
+   {"janus":"info","transaction":"t1"}
+   ```
+
+   Server replies with `{"janus":"server_info", plugins:{…}}`.
+   Useful for logging the plugin registry if an image variant renames
+   `janus.plugin.ustreamer`.
+
+2. Client → server, TEXT:
+
+   ```json
+   {"janus":"create","transaction":"t2"}
+   ```
+
+   Reply `{"janus":"success","data":{"id":S}}` — keep `S` as
+   `session_id` for all subsequent frames.
+
+3. Client → server, TEXT:
+
+   ```json
+   {"janus":"attach","plugin":"janus.plugin.ustreamer",
+    "session_id":S,"transaction":"t3"}
+   ```
+
+   Reply `{"janus":"success","data":{"id":H}}` — keep `H` as
+   `handle_id`.
+
+4. Client → server, TEXT:
+
+   ```json
+   {"janus":"message","body":{"request":"watch"},
+    "session_id":S,"handle_id":H,"transaction":"t4"}
+   ```
+
+   Two replies: a synchronous `{"janus":"ack"}` and, asynchronously,
+   `{"janus":"event", plugindata:{…}, jsep:{"type":"offer","sdp":"…"}}`.
+   The SDP offer is vanilla ICE — all `a=candidate` lines are already
+   inline and the block terminates with `a=end-of-candidates`, so no
+   trickle path is needed from the server side.
+
+5. Client → server, TEXT:
+
+   ```json
+   {"janus":"message","body":{"request":"start"},
+    "jsep":{"type":"answer","sdp":"…"},
+    "session_id":S,"handle_id":H,"transaction":"t5"}
+   ```
+
+   Our answer. Emit it only once `webrtcbin`'s `ice-gathering-state`
+   has reached `COMPLETE`, so the SDP carries all local candidates and
+   Janus has no reason to wait on trickle.
+
+6. Client → server, TEXT, every 30 s:
+
+   ```json
+   {"janus":"keepalive","session_id":S,"transaction":"t…"}
+   ```
+
+   Without it Janus tears the session down after ~60 s of silence.
+
+After step 5, media flows as SRTP inside the WebRTC transport that
+`webrtcbin` terminates — nothing further rides the signalling WS for
+video frames.
+
+Alternatives on the same PiKVM (not used by this client):
+
+* `GET /streamer/stream?key=…` — MJPEG via `multipart/x-mixed-replace`.
+  Higher bandwidth, higher latency, simpler plumbing. Retained as a
+  potential debug path if WebRTC negotiation fails.
+* `WSS /api/media/ws` — the raw-H.264-over-WS path served by
+  `kvmd-media`. Does not exist on stock PiKVM (the package is not
+  installed); a 404 on the upgrade is the standard symptom and is not
+  worth investigating further on a stock box.

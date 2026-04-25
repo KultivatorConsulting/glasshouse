@@ -9,8 +9,20 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network WebSockets Test)
+find_package(Qt6 6.7 REQUIRED COMPONENTS
+    Core Network WebSockets Test
+    Gui Widgets Multimedia MultimediaWidgets
+)
 qt_standard_project_setup()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GStreamer REQUIRED IMPORTED_TARGET
+    gstreamer-1.0
+    gstreamer-app-1.0
+    gstreamer-video-1.0
+    gstreamer-sdp-1.0
+    gstreamer-webrtc-1.0
+)
 
 # Vendor yaml-cpp via FetchContent so the build has no system-package
 # dependency beyond Qt. Build the library STATIC and suppress its tests/tools.
@@ -34,5 +46,8 @@ FetchContent_MakeAvailable(yaml-cpp)
 enable_testing()
 
 add_subdirectory(src/core)
+add_subdirectory(src/input)
 add_subdirectory(src/cli)
+add_subdirectory(src/video)
+add_subdirectory(src/viewer)
 add_subdirectory(tests)
