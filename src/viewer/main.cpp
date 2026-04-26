@@ -19,6 +19,7 @@
 #include <QPointer>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QTimer>
 
 #include <optional>
 
@@ -241,6 +242,20 @@ int main(int argc, char** argv) {
 
         QObject::connect(inst.pk, &PiKvmClient::authenticated, &app,
             [&inst, &app]() {
+                // Tear down stale Janus / pipeline state on re-auth.
+                // The handler is idempotent so the same wiring works
+                // whether this is the first login or a recovery cycle
+                // triggered by Phase 6's sessionFailed / errorOccurred
+                // path. The pipeline OBJECT persists; only its internal
+                // GStreamer state resets via stop() → start().
+                if (inst.jc) {
+                    inst.jc->close();
+                    inst.jc->deleteLater();
+                    inst.jc = nullptr;
+                }
+                if (inst.webrtc) inst.webrtc->stop();
+                if (inst.mjpeg)  inst.mjpeg->stop();
+
                 inst.window->setConnectionStatus(
                     QStringLiteral("%1: authenticated, starting pipeline")
                         .arg(inst.host));
@@ -283,11 +298,19 @@ int main(int argc, char** argv) {
                         });
                     QObject::connect(inst.webrtc, &VideoPipeline::answerReady,
                                      inst.jc, &JanusClient::sendAnswer);
-                    QObject::connect(inst.jc, &JanusClient::sessionFailed, inst.window,
-                        [&inst](const QString& reason) {
+                    QObject::connect(inst.jc, &JanusClient::sessionFailed, &app,
+                        [&inst, &app](const QString& reason) {
                             inst.window->setConnectionStatus(
-                                QStringLiteral("%1: Janus session failed: %2")
+                                QStringLiteral("%1: Janus session failed (%2) "
+                                               "— reconnecting…")
                                     .arg(inst.host, reason));
+                            // Re-auth after a small breather. The auth
+                            // handler tears down stale state and rebuilds.
+                            // PiKvmClient's own backoff handles network
+                            // bumps if /api/auth/login itself is down.
+                            QTimer::singleShot(2000, &app, [&inst]() {
+                                inst.pk->start();
+                            });
                         });
 
                     inst.jc->open();
@@ -321,8 +344,10 @@ int main(int argc, char** argv) {
 
         // Wire firstFrame / error to whichever pipeline this instance owns.
         // Both classes expose the same two signals with identical semantics;
-        // the indirection lives only here at startup.
-        auto wireFrameSignals = [&inst](auto* pipe, const char* originLabel) {
+        // the indirection lives only here at startup. Errors trigger the
+        // same re-auth path as a Janus terminal failure: tear down stale
+        // state via the auth handler and rebuild from a fresh login.
+        auto wireFrameSignals = [&inst, &app](auto* pipe, const char* originLabel) {
             QObject::connect(pipe, &std::remove_pointer_t<decltype(pipe)>::firstFrameRendered,
                 inst.window, [&inst, originLabel]() {
                     const qint64 ms = inst.wallClock->isValid()
@@ -334,10 +359,13 @@ int main(int argc, char** argv) {
                             : QStringLiteral("first frame"));
                 });
             QObject::connect(pipe, &std::remove_pointer_t<decltype(pipe)>::errorOccurred,
-                inst.window, [&inst](const QString& msg) {
+                &app, [&inst, &app](const QString& msg) {
                     inst.window->setConnectionStatus(
-                        QStringLiteral("%1: pipeline error: %2")
+                        QStringLiteral("%1: pipeline error: %2 — reconnecting…")
                             .arg(inst.host, msg));
+                    QTimer::singleShot(2000, &app, [&inst]() {
+                        inst.pk->start();
+                    });
                 });
         };
         if (inst.transport == VideoTransport::Janus) {

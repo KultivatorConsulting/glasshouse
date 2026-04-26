@@ -398,9 +398,39 @@ event and feeds that rect (in frame-local coords) as the
 to the nearest video edge, matching how the video is actually painted.
 Falls back to the full widget rect before the first frame arrives.
 
-### Phase 6 — Reliability (1 day)
-PiKVM disconnects/reconnects, video stall recovery, auth token
-refresh. Graceful degradation of display when video is unavailable.
+### Phase 6 — Reliability (1 day) — done
+
+Two-tier reconnect strategy:
+
+* **Short loop (transport-internal).** `JanusClient` retries its own WS
+  open with exponential backoff (1 s → 2 s → 4 s → 8 s, cap 30 s) up
+  to four attempts before escalating. Per-attempt state (sessionId,
+  handleId, transaction map) is reset on each try; the auth cookie is
+  re-used. The retry budget resets to zero on `sdpOfferReceived` —
+  signalling reaching that point is the success criterion. `PiKvmClient`
+  has had this style of reconnect since Phase 1 for the state WS.
+* **Long loop (orchestrator-driven).** When `JanusClient::sessionFailed`
+  fires (terminal — Janus give-up after the short loop, or pipeline
+  bus-error from `VideoPipeline` / `MjpegPipeline`), `viewer/main.cpp`
+  schedules `PiKvmClient::start()` after a 2 s breather. That triggers
+  a fresh `/api/auth/login`, so the next pass sees a current cookie —
+  this is the auth-token refresh path. The `authenticated` handler is
+  idempotent: it tears down stale `JanusClient` / pipeline state at
+  the top before rebuilding.
+
+Stable sessions stay stable: the `sdpOfferReceived` reset means Phase 6
+doesn't penalise long-running sessions for accumulated retry counts.
+
+A 120 Hz mouse-move coalescer in `VideoWindow` flushes the latest
+captured cursor position once per ~8 ms instead of once per Wayland
+event. Wayland delivers up to 1 kHz on a high-poll mouse; kvmd's USB
+HID gadget drains 125–500 Hz, so the flow used to queue server-side
+and surface as cursor lag. Button presses force-flush so the
+"move-then-click" order stays tight.
+
+Graceful degradation: status-bar messages already cover "reconnecting…"
+without an in-video overlay; left as-is until field testing surfaces a
+specific gap.
 
 ### Phase 7 — Polish
 Persist window positions, cleanup on exit, logging, systemd

@@ -72,6 +72,7 @@ private slots:
     void onWsDisconnected();
     void onWsTextMessage(const QString& msg);
     void onKeepaliveTick();
+    void attemptReconnect();
 
 private:
     QString nextTxn(const QString& tag);
@@ -85,11 +86,21 @@ private:
     void    handleSuccess(const QJsonObject& obj, const QString& tag);
     void    handleEvent(const QJsonObject& obj);
     void    handleError(const QJsonObject& obj, const QString& tag);
-    void    fail(const QString& reason);
+
+    // Reliability path. Any in-flight signalling failure (WS drop,
+    // Janus error frame, etc.) routes through `transientFail`, which
+    // either schedules another open() or, after the retry budget is
+    // exhausted, escalates via `terminalFail` → `sessionFailed`.
+    void    transientFail(const QString& reason);
+    void    terminalFail(const QString& reason);
+    void    scheduleReconnect();
+    void    resetPerAttemptState();
+    void    openWebSocket();
 
     Options                      m_opts;
     std::unique_ptr<QWebSocket>  m_ws;
     std::unique_ptr<QTimer>      m_keepalive;
+    std::unique_ptr<QTimer>      m_reconnectTimer;
 
     quint64                      m_nextTxn = 1;
     // transaction id -> logical tag ("info","create","attach","watch",
@@ -98,7 +109,10 @@ private:
 
     qint64                       m_sessionId = 0;
     qint64                       m_handleId  = 0;
-    bool                         m_failed    = false;
+
+    bool                         m_stopRequested = false;
+    int                          m_attempt        = 0;
+    int                          m_reconnectBackoffMs = 1000;
 };
 
 }  // namespace glasshouse

@@ -12,6 +12,7 @@
 #include <QMouseEvent>
 #include <QShortcut>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVideoSink>
 #include <QVideoWidget>
 #include <QWheelEvent>
@@ -69,6 +70,15 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     // otherwise leave them alone (so the window chrome still works).
     m_video->installEventFilter(this);
     m_video->setMouseTracking(true);
+
+    // ~120 Hz coalescer for mouse moves. Always running — handleMouseMove
+    // sets `m_mousePending` only while captured, so the timer is a no-op
+    // outside capture.
+    m_mouseFlushTimer = new QTimer(this);
+    m_mouseFlushTimer->setInterval(8);  // 8 ms ≈ 120 Hz
+    connect(m_mouseFlushTimer, &QTimer::timeout, this,
+            &VideoWindow::flushMousePending);
+    m_mouseFlushTimer->start();
 }
 
 VideoWindow::~VideoWindow() = default;
@@ -283,17 +293,30 @@ bool VideoWindow::handleMouseButton(QMouseEvent* ev, bool pressed) {
     const auto btn = qtToMouseButton(ev->button());
     if (!btn) return true;  // unknown button — swallow rather than confuse
 
+    // Force the coalescer to flush at the click point so the target sees
+    // the cursor at the click coords *before* the button event arrives.
     const auto api = apiCoordForCursor(ev->globalPosition().toPoint());
-    emit mouseMoved(api.x, api.y);
+    m_pendingMouseX = api.x;
+    m_pendingMouseY = api.y;
+    m_mousePending  = true;
+    flushMousePending();
     emit mouseButton(*btn, pressed);
     return true;
 }
 
 bool VideoWindow::handleMouseMove(QMouseEvent* ev) {
     if (!m_captured) return false;
-    const auto api = apiCoordForCursor(ev->globalPosition().toPoint());
-    emit mouseMoved(api.x, api.y);
+    const auto api  = apiCoordForCursor(ev->globalPosition().toPoint());
+    m_pendingMouseX = api.x;
+    m_pendingMouseY = api.y;
+    m_mousePending  = true;
     return true;
+}
+
+void VideoWindow::flushMousePending() {
+    if (!m_mousePending) return;
+    m_mousePending = false;
+    emit mouseMoved(m_pendingMouseX, m_pendingMouseY);
 }
 
 bool VideoWindow::handleWheel(QWheelEvent* ev) {

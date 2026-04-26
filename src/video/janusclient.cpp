@@ -16,7 +16,13 @@ namespace glasshouse {
 namespace {
 // Janus defaults to a 60 s session-inactivity timeout. 30 s keepalive keeps
 // a comfortable margin and matches what the PiKVM web UI ships.
-constexpr int kKeepaliveMs = 30'000;
+constexpr int kKeepaliveMs       = 30'000;
+constexpr int kInitialBackoffMs  = 1'000;
+constexpr int kMaxBackoffMs      = 30'000;
+// Total attempts (including the first) before we escalate via
+// sessionFailed. With the backoff schedule above, that's ~1+2+4+8 = 15 s
+// worst-case before main.cpp gets to re-authenticate and rebuild.
+constexpr int kMaxAttempts       = 4;
 }  // namespace
 
 JanusClient::JanusClient(Options opts, QObject* parent)
@@ -25,11 +31,31 @@ JanusClient::JanusClient(Options opts, QObject* parent)
     m_keepalive->setInterval(kKeepaliveMs);
     connect(m_keepalive.get(), &QTimer::timeout,
             this, &JanusClient::onKeepaliveTick);
+
+    m_reconnectTimer = std::make_unique<QTimer>(this);
+    m_reconnectTimer->setSingleShot(true);
+    connect(m_reconnectTimer.get(), &QTimer::timeout,
+            this, &JanusClient::attemptReconnect);
 }
 
 JanusClient::~JanusClient() = default;
 
 void JanusClient::open() {
+    m_stopRequested      = false;
+    m_attempt            = 0;
+    m_reconnectBackoffMs = kInitialBackoffMs;
+    resetPerAttemptState();
+    openWebSocket();
+}
+
+void JanusClient::close() {
+    m_stopRequested = true;
+    m_keepalive->stop();
+    m_reconnectTimer->stop();
+    if (m_ws) m_ws->close();
+}
+
+void JanusClient::openWebSocket() {
     m_ws = std::make_unique<QWebSocket>();
 
     connect(m_ws.get(), &QWebSocket::connected,
@@ -52,13 +78,16 @@ void JanusClient::open() {
     QWebSocketHandshakeOptions hs;
     hs.setSubprotocols({QStringLiteral("janus-protocol")});
 
-    qCInfo(lcJanus) << m_opts.host << "opening Janus WS";
+    qCInfo(lcJanus) << m_opts.host << "opening Janus WS"
+                    << "(attempt" << (m_attempt + 1) << "of" << kMaxAttempts << ")";
     m_ws->open(req, hs);
 }
 
-void JanusClient::close() {
-    m_keepalive->stop();
-    if (m_ws) m_ws->close();
+void JanusClient::resetPerAttemptState() {
+    m_sessionId = 0;
+    m_handleId  = 0;
+    m_txnTag.clear();
+    m_nextTxn   = 1;
 }
 
 void JanusClient::onWsConnected() {
@@ -76,7 +105,7 @@ void JanusClient::onWsDisconnected() {
               .arg(m_ws->errorString())
         : QStringLiteral("Janus WS closed");
     qCInfo(lcJanus) << m_opts.host << "Janus WS disconnected:" << reason;
-    if (!m_failed) emit sessionFailed(reason);
+    transientFail(reason);
 }
 
 void JanusClient::onWsTextMessage(const QString& msg) {
@@ -112,7 +141,7 @@ void JanusClient::onWsTextMessage(const QString& msg) {
             || kind == QLatin1String("detached")
             || kind == QLatin1String("timeout")) {
         qCInfo(lcJanus) << m_opts.host << "Janus session ended:" << kind;
-        fail(kind);
+        transientFail(kind);
     } else {
         qCDebug(lcJanus) << m_opts.host << "unhandled janus kind:" << kind;
     }
@@ -255,6 +284,11 @@ void JanusClient::handleEvent(const QJsonObject& obj) {
     }
     qCInfo(lcJanus) << m_opts.host << "SDP offer received,"
                     << sdp.size() << "bytes";
+    // Signalling reached its happy state. From here, any drop is a
+    // "stable session interrupted" rather than a startup failure, so
+    // reset the retry budget — the next reconnect cycle starts fresh.
+    m_attempt            = 0;
+    m_reconnectBackoffMs = kInitialBackoffMs;
     emit sdpOfferReceived(sdp);
 }
 
@@ -265,14 +299,45 @@ void JanusClient::handleError(const QJsonObject& obj, const QString& tag) {
         .arg(tag.isEmpty() ? QStringLiteral("?") : tag)
         .arg(err.value(QStringLiteral("reason")).toString());
     qCWarning(lcJanus) << m_opts.host << reason;
-    fail(reason);
+    transientFail(reason);
 }
 
-void JanusClient::fail(const QString& reason) {
-    if (m_failed) return;
-    m_failed = true;
+void JanusClient::transientFail(const QString& reason) {
+    if (m_stopRequested) return;
+    m_keepalive->stop();
+    if (m_ws) {
+        // Disconnect signal slots so the impending close doesn't
+        // recursively trigger this path again.
+        m_ws->disconnect(this);
+        m_ws->close();
+    }
+
+    if (m_attempt + 1 >= kMaxAttempts) {
+        terminalFail(reason);
+        return;
+    }
+    scheduleReconnect();
+}
+
+void JanusClient::terminalFail(const QString& reason) {
+    qCWarning(lcJanus) << m_opts.host
+                       << "giving up Janus connection after"
+                       << (m_attempt + 1) << "attempts:" << reason;
     emit sessionFailed(reason);
-    if (m_ws) m_ws->close();
+}
+
+void JanusClient::scheduleReconnect() {
+    qCInfo(lcJanus) << m_opts.host << "reconnect in"
+                    << m_reconnectBackoffMs << "ms";
+    m_reconnectTimer->start(m_reconnectBackoffMs);
+    m_reconnectBackoffMs = std::min(m_reconnectBackoffMs * 2, kMaxBackoffMs);
+}
+
+void JanusClient::attemptReconnect() {
+    if (m_stopRequested) return;
+    ++m_attempt;
+    resetPerAttemptState();
+    openWebSocket();
 }
 
 }  // namespace glasshouse

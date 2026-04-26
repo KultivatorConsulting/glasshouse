@@ -101,6 +101,7 @@ protected:
 
 private:
     void startCapture();
+    void flushMousePending();
 
     // Pick the right CoordTransform for a cursor at globalPos: if the
     // cursor is currently over one of our sibling windows, use *that*
@@ -132,6 +133,17 @@ private:
     // Other VideoWindows in this session. QPointer because windows can
     // be closed independently; iteration tolerates a stale entry.
     QList<QPointer<VideoWindow>> m_siblings;
+
+    // Mouse-move coalescer. Wayland delivers mouse moves at up to 1 kHz;
+    // kvmd's USB HID gadget can drain ~125–500 Hz. Sending every event
+    // queues frames on the server side and surfaces as cursor lag. We
+    // hold the latest API-space position and flush it through a timer
+    // tick at ~120 Hz instead. Button presses force-flush to keep the
+    // "move-then-click" order tight.
+    class QTimer* m_mouseFlushTimer = nullptr;
+    bool          m_mousePending    = false;
+    int           m_pendingMouseX   = 0;
+    int           m_pendingMouseY   = 0;
 };
 
 }  // namespace glasshouse
