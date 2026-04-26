@@ -15,7 +15,9 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDateTime>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QPointer>
 #include <QSettings>
 #include <QStandardPaths>
@@ -37,6 +39,39 @@ void errln(const QString& s) {
     QTextStream err(stderr);
     err << s << '\n';
     err.flush();
+}
+
+// File-logging glue. Active only when --log-file is passed; otherwise
+// Qt's default handler writes to stderr unmodified.
+QFile*           g_logFile        = nullptr;
+QTextStream*     g_logStream      = nullptr;
+QtMessageHandler g_originalLogger = nullptr;
+
+void glasshouseMessageHandler(QtMsgType type,
+                              const QMessageLogContext& ctx,
+                              const QString& msg) {
+    // Always let Qt's default handler render to stderr first — it
+    // honours QT_LOGGING_RULES the way users expect, and we don't want
+    // to reimplement that filtering here.
+    if (g_originalLogger) g_originalLogger(type, ctx, msg);
+
+    if (!g_logStream) return;
+
+    const char* levelTag = "?";
+    switch (type) {
+        case QtDebugMsg:    levelTag = "DEBUG"; break;
+        case QtInfoMsg:     levelTag = "INFO";  break;
+        case QtWarningMsg:  levelTag = "WARN";  break;
+        case QtCriticalMsg: levelTag = "ERROR"; break;
+        case QtFatalMsg:    levelTag = "FATAL"; break;
+    }
+    const QString line = QStringLiteral("%1 %2 %3 %4")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
+             QString::fromLatin1(levelTag),
+             QString::fromLatin1(ctx.category ? ctx.category : "default"),
+             msg);
+    *g_logStream << line << '\n';
+    g_logStream->flush();
 }
 
 // One PiKVM = one VideoWindow + its auth/signalling/decode chain. All
@@ -119,9 +154,30 @@ int main(int argc, char** argv) {
         QStringLiteral("Bring up only the window for this PiKVM host. "
                        "Default: all configured windows."),
         QStringLiteral("ip"));
+    QCommandLineOption logFileOpt(
+        {QStringLiteral("L"), QStringLiteral("log-file")},
+        QStringLiteral("Append all log messages to FILE in addition to stderr. "
+                       "No rotation; pair with logrotate(8) for long sessions."),
+        QStringLiteral("path"));
     parser.addOption(configOpt);
     parser.addOption(onlyOpt);
+    parser.addOption(logFileOpt);
     parser.process(app);
+
+    // Wire file logging early so config-load failures land in the file too.
+    if (const QString logFilePath = parser.value(logFileOpt);
+            !logFilePath.isEmpty()) {
+        g_logFile = new QFile(logFilePath);
+        if (g_logFile->open(QIODevice::WriteOnly | QIODevice::Append)) {
+            g_logStream      = new QTextStream(g_logFile);
+            g_originalLogger = qInstallMessageHandler(glasshouseMessageHandler);
+        } else {
+            errln(QStringLiteral("cannot open log file %1: %2")
+                      .arg(logFilePath, g_logFile->errorString()));
+            delete g_logFile;
+            g_logFile = nullptr;
+        }
+    }
 
     const auto result = loadConfig(parser.value(configOpt));
     if (!result.ok()) {
@@ -456,5 +512,18 @@ int main(int argc, char** argv) {
         delete inst.wallClock;
     }
     delete specialKeys;
+
+    // Tear down file logging cleanly so the last few log lines hit disk.
+    if (g_logStream) {
+        if (g_originalLogger) qInstallMessageHandler(g_originalLogger);
+        g_logStream->flush();
+        delete g_logStream;
+        g_logStream = nullptr;
+    }
+    if (g_logFile) {
+        g_logFile->close();
+        delete g_logFile;
+        g_logFile = nullptr;
+    }
     return rc;
 }

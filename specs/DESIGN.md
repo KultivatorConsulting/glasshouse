@@ -451,9 +451,15 @@ through `InputRouter` to the HID-master `PiKvmClient::atxClick`
 (`POST /api/atx/click_button?button=…`). The menubar hides alongside
 the status bar in fullscreen.
 
-Still TBD: in-process logging tweaks (file handler / rotation),
-systemd user-service unit for autostart, MSD upload menu item,
-bundling Qt 6.7 with the .deb (currently a separate prerequisite).
+**File logging — done.** `glasshouse-viewer --log-file PATH` (`-L`) installs
+a custom `QtMessageHandler` that delegates to the default stderr handler
+(so `QT_LOGGING_RULES` filtering still works) and additionally appends
+ISO-timestamped lines to PATH. Append mode, no rotation — pair with
+`logrotate(8)` for long-running sessions.
+
+Still TBD: systemd user-service unit for autostart (gated on the Qt
+distribution decision — autostart with a non-system Qt is brittle),
+MSD upload menu item, bundling Qt 6.7 with the .deb.
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)
