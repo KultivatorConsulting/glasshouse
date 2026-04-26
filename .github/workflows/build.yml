@@ -27,12 +27,18 @@ jobs:
           fetch-depth: 0
 
       - name: Apt build deps
+        # We build against noble's system Qt 6.4 — see CMakeLists comment
+        # on the find_package call. That keeps the .deb's runtime deps as
+        # plain apt packages and avoids the per-build aqt download.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build \
             cmake \
             pkg-config \
+            qt6-base-dev \
+            qt6-multimedia-dev \
+            qt6-websockets-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev \
@@ -40,21 +46,6 @@ jobs:
             gstreamer1.0-nice \
             gstreamer1.0-libav \
             libnice-dev
-
-      - name: Install Qt 6.7
-        # Ubuntu 24.04 noble ships Qt 6.4; we need ≥ 6.7 for QWebSocket
-        # subprotocol options and a few QVideoSink behaviors. aqt-installed
-        # Qt sits in the runner-only path; the produced binary needs the
-        # same Qt 6.7 to be present at install time on the target machine
-        # (see dist/nfpm.yaml).
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.3'
-          host: 'linux'
-          target: 'desktop'
-          arch: 'linux_gcc_64'
-          modules: 'qtmultimedia qtwebsockets'
-          cache: true
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

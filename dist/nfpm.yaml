@@ -5,11 +5,10 @@
 # ${VERSION} natively); GitHub Actions sets it from the git tag for releases
 # and from `0.0.0+sha.<short>` for branch builds.
 #
-# Note: Qt6 is intentionally not in `depends`. The current target environment
-# uses an aqt-installed Qt 6.7 toolchain, which Ubuntu 24.04's apt does not
-# expose at that version. Once we decide between bundling Qt with the
-# package or shipping for system Qt 6.4 (lowering the CMakeLists pin),
-# update `depends` accordingly.
+# Targets Ubuntu 24.04 noble. Qt 6.4 runtime libs come from noble's apt
+# repository — the t64 suffixes on Core/Gui/Widgets/Network are the noble
+# transition packages; Multimedia/MultimediaWidgets/WebSockets aren't
+# affected and stay un-suffixed.
 
 name: glasshouse-viewer
 arch: amd64
@@ -31,6 +30,14 @@ description: |
   single keyboard and mouse session through a chosen HID master.
 
 depends:
+  # Qt 6.4 runtime (noble t64 transition packages where applicable).
+  - libqt6core6t64
+  - libqt6gui6t64
+  - libqt6widgets6t64
+  - libqt6network6t64
+  - libqt6websockets6
+  - libqt6multimedia6
+  - libqt6multimediawidgets6
   # GStreamer runtime — both transports lean on the gst plugin set.
   - libgstreamer1.0-0
   - gstreamer1.0-plugins-good       # souphttpsrc, multipartdemux, jpegdec

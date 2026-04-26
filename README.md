@@ -36,13 +36,9 @@ install with:
 sudo apt install ./glasshouse-viewer_<version>_amd64.deb
 ```
 
-`apt install` (vs. `dpkg -i`) resolves the GStreamer / libnice apt
-dependencies in one step.
-
-> **Qt 6.7 prerequisite.** The current `.deb` does not bundle Qt and Ubuntu
-> 24.04's archive ships only Qt 6.4. Install Qt 6.7 per-user via aqt before
-> running the viewer (see [Installing Qt 6.7 without touching the system](#installing-qt-67-without-touching-the-system)
-> below). Bundling Qt with the package is on the todo list.
+`apt install` (vs. `dpkg -i`) resolves Qt 6, GStreamer, and libnice
+runtime dependencies from the stock Ubuntu 24.04 archive in one step —
+no per-user Qt setup required.
 
 The package drops an example config at
 `/etc/xdg/glasshouse/glasshouse-viewer.example.yaml` — copy it to
@@ -77,28 +73,24 @@ glasshouse/
 | Compiler   | GCC 13.3+                      | C++20 required                                  |
 | CMake      | 3.25+                          | tested on 4.3                                   |
 | Ninja      | any recent                     | used by the `default` preset                    |
-| Qt         | 6.7+ (Core, Network, WebSockets, Test) | installed per-user (see below)          |
+| Qt         | 6.4+ (Core, Network, WebSockets, Test, Gui, Widgets, Multimedia, MultimediaWidgets) | system Qt from `qt6-base-dev` etc. is enough; nothing post-6.4 is used |
 | yaml-cpp   | 0.8.0                          | vendored via `FetchContent` — no system package |
 
-### Installing Qt 6.7 without touching the system
-
-Ubuntu 24.04's archive ships Qt 6.4, which is what KDE Plasma itself is
-linked against on Kubuntu. **Do not install a Qt backports PPA** — it
-replaces system `libqt6*` under a running desktop and has historically been
-a good way to end up at a tty after a reboot. Install Qt 6.7 into your home
-directory instead:
+### Build dependencies (apt)
 
 ```bash
-pipx install aqtinstall
-mkdir -p ~/Qt
-aqt install-qt linux desktop 6.7.3 linux_gcc_64 -m qtwebsockets -O ~/Qt
+sudo apt install qt6-base-dev qt6-multimedia-dev qt6-websockets-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-bad \
+    gstreamer1.0-nice gstreamer1.0-libav libnice-dev \
+    cmake ninja-build pkg-config
 ```
 
-`CMakePresets.json` points `CMAKE_PREFIX_PATH` at `$HOME/Qt/6.7.3/gcc_64`.
-If you install a different 6.7.x patch, either update the preset or pass
-`-DCMAKE_PREFIX_PATH=...` on the command line.
-
-To uninstall: `rm -rf ~/Qt`. Nothing else is affected.
+The `CMakePresets.json` `default` preset still points
+`CMAKE_PREFIX_PATH` at `$HOME/Qt/6.7.3/gcc_64` for legacy reasons —
+override with `-DCMAKE_PREFIX_PATH=` (empty) on the command line if you
+want to force the system Qt explicitly, or just delete that line if you
+only have system Qt.
 
 ## Build
 

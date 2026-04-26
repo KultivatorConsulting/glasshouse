@@ -240,7 +240,7 @@ parameterized.
 
 | Concern | Choice | Notes |
 |---|---|---|
-| UI framework | Qt 6.7+ (C++) | KDE-native, fastest to ship |
+| UI framework | Qt 6.4+ (C++) | system Qt on Ubuntu 24.04 noble; nothing post-6.4 is used |
 | Video decode | GStreamer 1.24 via QtMultimedia | `vah264dec` for VA-API, auto-selected |
 | Video transport | H.264 over WebRTC via Janus (`/janus/ws`, plugin `janus.plugin.ustreamer`) | The only H.264 path stock PiKVM exposes; see §10.5 |
 | HTTP/WS | Qt's QNetworkAccessManager + QWebSocket | In-tree, no extra deps |
@@ -475,9 +475,17 @@ MSD always targets the HID master (the assumption being that whichever
 PiKVM drives the target's HID also has the MSD hardware wired) — for
 mixed topologies a per-PiKVM selector is a follow-up.
 
-Still TBD: systemd user-service unit for autostart (gated on the Qt
-distribution decision — autostart with a non-system Qt is brittle),
-bundling Qt 6.7 with the .deb.
+**Qt distribution — decided.** The codebase audited clean against Qt 6.4
+(nothing post-6.4 is in use), so the `find_package(Qt6 6.4 REQUIRED)`
+pin matches what Ubuntu 24.04 noble ships in apt. CI and the .deb both
+target system Qt 6.4: build deps are `qt6-base-dev / qt6-multimedia-dev
+/ qt6-websockets-dev`, runtime deps are the noble `libqt6*t64` /
+`libqt6multimedia6` / `libqt6websockets6` set. No bundling, no
+side-by-side aqt install, no LD_LIBRARY_PATH dance. Local development
+can still use a newer Qt via aqt — 6.4 is the *minimum*, not a pin.
+
+Still TBD: systemd user-service unit for autostart (now unblocked since
+the Qt path matches a normal apt install).
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)

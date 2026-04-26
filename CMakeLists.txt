@@ -14,7 +14,13 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS
+# Qt 6.4 is the minimum that satisfies QWebSocketHandshakeOptions
+# (used in JanusClient) — every other Qt API in this codebase is from
+# Qt 6.0–6.4. 6.4 is also what Ubuntu 24.04 noble's apt ships, so the
+# .deb can declare a runtime dep on the stock distro packages instead
+# of bundling Qt or shipping a side-by-side install. Local development
+# is free to use a newer Qt via aqt; this is a *minimum*, not a pin.
+find_package(Qt6 6.4 REQUIRED COMPONENTS
     Core Network WebSockets Test
     Gui Widgets Multimedia MultimediaWidgets
 )

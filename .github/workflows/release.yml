@@ -19,12 +19,17 @@ jobs:
           fetch-depth: 0
 
       - name: Apt build deps
+        # System Qt 6.4 from noble — keeps the .deb's runtime deps as
+        # stock apt packages. See CMakeLists comment on find_package.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build \
             cmake \
             pkg-config \
+            qt6-base-dev \
+            qt6-multimedia-dev \
+            qt6-websockets-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev \
@@ -32,16 +37,6 @@ jobs:
             gstreamer1.0-nice \
             gstreamer1.0-libav \
             libnice-dev
-
-      - name: Install Qt 6.7
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.3'
-          host: 'linux'
-          target: 'desktop'
-          arch: 'linux_gcc_64'
-          modules: 'qtmultimedia qtwebsockets'
-          cache: true
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
