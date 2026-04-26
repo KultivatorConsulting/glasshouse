@@ -170,15 +170,28 @@ Worked example (N=2, desktop 3840×1080):
 
 ### 5.3 Window-switching behavior
 
-Because the UX is click-to-capture + release hotkey, cursor transitions
-between windows are discrete: release current capture, move local
-cursor, click new window, capture begins. The target cursor visibly
-teleports at each new capture — this is inherent to Option A with
-independent window layouts and is acceptable.
+Capture is **session-wide**, not per-window. Clicking inside any window
+starts capture; that window becomes the *holder* (it owns Qt's mouse +
+keyboard grab and is the anchor for event delivery). While capture is
+active, the cursor is hidden across the whole app and can be moved
+freely between sibling windows. On every mouse event the active
+`CoordTransform` is the one belonging to whichever window the cursor is
+currently over — so target-cursor motion across the windows is
+**continuous**, not the per-window teleport an earlier draft of this
+doc described.
 
-Keyboard events while captured always go to the HID master, regardless
-of which window is captured. Mouse events use the captured window's
-coordinate transform but still output via the HID master.
+That continuity is correct because every window represents a sub-region
+of the same combined target desktop and every window's input goes
+through the same HID master (Option A, §4.1). Walking the local cursor
+from window 1's right edge into window 2's left edge maps to walking
+the target cursor from monitor 1's right edge into monitor 2's left
+edge — exactly the behaviour a real multi-monitor extended desktop
+gives.
+
+The release hotkey ends capture globally, regardless of which window
+is the holder. Keyboard events while captured always go to the HID
+master, mouse events use the cursor's current host window's transform
+but still output via the HID master.
 
 ## 6. Component architecture (Qt6)
 
@@ -307,7 +320,8 @@ auth:
     user: admin
     password_ref: secret://pikvm-2-passwd
 
-release_hotkey: "Ctrl+Alt+Shift+Escape"
+release_hotkey:    "Ctrl+Alt+Shift+Escape"   # ends session-wide capture
+fullscreen_hotkey: "F11"                     # toggles per-window fullscreen
 
 video:
   prefer_hw_decode: true    # VA-API; software fallback on init failure

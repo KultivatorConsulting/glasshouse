@@ -47,6 +47,7 @@ struct Config {
     QString                hid_master;
     QMap<QString, AuthSpec> auth;           // keyed by MonitorRect::pikvm
     QString                release_hotkey;
+    QString                fullscreen_hotkey;
     VideoSpec              video;
     QList<WindowSpec>      windows;
 };

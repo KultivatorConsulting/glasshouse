@@ -173,7 +173,8 @@ ConfigResult loadConfig(const QString& path) {
     }
 
     // release_hotkey
-    cfg.release_hotkey = yamlString(root, "release_hotkey");
+    cfg.release_hotkey    = yamlString(root, "release_hotkey");
+    cfg.fullscreen_hotkey = yamlString(root, "fullscreen_hotkey");
 
     // video
     if (const auto v = root["video"]; v) {

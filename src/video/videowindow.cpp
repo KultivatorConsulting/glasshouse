@@ -10,6 +10,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QShortcut>
 #include <QStatusBar>
 #include <QVideoSink>
 #include <QVideoWidget>
@@ -73,13 +74,81 @@ QVideoSink* VideoWindow::videoSink() const {
 
 void VideoWindow::setCaptureContext(const QRect& targetMonitor,
                                     const QSize& logicalDesktop,
-                                    const QString& releaseHotkey) {
-    m_targetMonitor   = targetMonitor;
-    m_logicalDesktop  = logicalDesktop;
-    m_releaseHotkey   = encodeHotkey(releaseHotkey);
+                                    const QString& releaseHotkey,
+                                    const QString& fullscreenHotkey) {
+    m_targetMonitor    = targetMonitor;
+    m_logicalDesktop   = logicalDesktop;
+    m_releaseHotkey    = encodeHotkey(releaseHotkey);
+    m_fullscreenHotkey = encodeHotkey(fullscreenHotkey);
     if (m_releaseHotkey == 0 && !releaseHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable release_hotkey:" << releaseHotkey;
     }
+    if (m_fullscreenHotkey == 0 && !fullscreenHotkey.isEmpty()) {
+        qCWarning(lcHid) << "unparseable fullscreen_hotkey:" << fullscreenHotkey;
+    }
+
+    // Pre-capture path: while no widget has Qt's keyboard grab, the
+    // QShortcut machinery handles the hotkey. While captured, grabKeyboard
+    // bypasses QShortcut and the eventFilter check in handleKey takes
+    // over — so the same hotkey value drives both routes.
+    if (m_fullscreenHotkey != 0) {
+        auto* sc = new QShortcut(QKeySequence(fullscreenHotkey), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated, this, &VideoWindow::toggleFullscreen);
+    }
+}
+
+void VideoWindow::toggleFullscreen() {
+    if (isFullScreen()) {
+        showNormal();
+        statusBar()->show();
+    } else {
+        statusBar()->hide();
+        showFullScreen();
+    }
+}
+
+void VideoWindow::setSiblings(const QList<QPointer<VideoWindow>>& siblings) {
+    m_siblings = siblings;
+}
+
+ApiCoord VideoWindow::apiCoordForCursor(const QPoint& globalPos) const {
+    // Prefer whichever sibling currently contains the cursor — that's
+    // the window whose CoordTransform should drive the target's HID
+    // for this event. Fall back to self if the cursor is outside every
+    // sibling (the cursor must be over *some* window, since grabMouse
+    // routed the event here, but it could be over our own window or a
+    // gap; transformFor clamps cleanly in either case).
+    for (const auto& sib : m_siblings) {
+        if (!sib || sib.data() == this) continue;
+        if (sib->frameGeometry().contains(globalPos)) {
+            return sib->transformFor(globalPos);
+        }
+    }
+    return transformFor(globalPos);
+}
+
+ApiCoord VideoWindow::transformFor(const QPoint& globalPos) const {
+    // Letterbox rect needs to be in window-frame coords (same space as
+    // frameGeometry). m_video->geometry() is in QMainWindow content
+    // coords — i.e. relative to the central widget area, not the frame
+    // — so map the video widget's top-left through globals to compute
+    // its offset inside the frame. Without this, every transform is
+    // off by the title-bar (and any menu/toolbar) height.
+    const QPoint videoGlobalTL = m_video->mapToGlobal(QPoint(0, 0));
+    const QRect  frame         = frameGeometry();
+    const QRect  letterboxFrameLocal(
+        videoGlobalTL.x() - frame.x(),
+        videoGlobalTL.y() - frame.y(),
+        m_video->width(),
+        m_video->height());
+    return transformToApi({
+        globalPos,
+        frame,
+        letterboxFrameLocal,
+        m_targetMonitor,
+        m_logicalDesktop,
+    });
 }
 
 void VideoWindow::setConnectionStatus(const QString& text) {
@@ -98,19 +167,25 @@ void VideoWindow::startCapture() {
     if (m_captured) return;
     m_captured = true;
 
-    // App-wide blank cursor. setOverrideCursor also hides the cursor when it
-    // briefly leaves the window (e.g. we never installed a compositor pointer
-    // constraint). restoreOverrideCursor undoes it on stopCapture.
+    // Capture is session-wide: this window becomes the "holder" that
+    // owns the Qt grabs, but mouse events fall through transformFor()
+    // on whichever sibling the cursor is currently over. The holder is
+    // just the anchor — there's no per-window capture state to enforce
+    // across siblings.
+
+    // App-wide blank cursor so the cursor stays invisible while it's
+    // moved across sibling windows. Native window decorations remain
+    // window-manager-drawn; that mismatch is acceptable in practice
+    // because the user types into the target, not the title bar.
     QApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
 
-    // Route all mouse events to the video widget even when the cursor is
-    // physically outside it; route keyboard there too.
+    // grabMouse so events keep arriving at this widget even when the
+    // cursor is physically over a sibling window's video area.
+    // grabKeyboard so the user can type without having to keep focus
+    // pinned. Qt auto-releases prior grabs when a new widget grabs, so
+    // a different window starting capture later does the right thing.
     m_video->grabMouse();
     m_video->grabKeyboard();
-
-    // Catch keyboard globally — otherwise modifiers pressed while focus is
-    // on the status bar (or nowhere) get missed.
-    QApplication::instance()->installEventFilter(this);
 
     qCInfo(lcHid) << "capture started";
     emit captureStateChanged(true);
@@ -132,7 +207,6 @@ void VideoWindow::stopCapture() {
         emit keyEvent(mod, /*pressed=*/false);
     }
 
-    QApplication::instance()->removeEventFilter(this);
     m_video->releaseKeyboard();
     m_video->releaseMouse();
     QApplication::restoreOverrideCursor();
@@ -185,15 +259,7 @@ bool VideoWindow::handleMouseButton(QMouseEvent* ev, bool pressed) {
     const auto btn = qtToMouseButton(ev->button());
     if (!btn) return true;  // unknown button — swallow rather than confuse
 
-    // Forward the cursor position that accompanies this click, so the
-    // target cursor is at the click point before the button event fires.
-    const auto api = transformToApi({
-        ev->globalPosition().toPoint(),
-        frameGeometry(),
-        m_video->geometry(),
-        m_targetMonitor,
-        m_logicalDesktop,
-    });
+    const auto api = apiCoordForCursor(ev->globalPosition().toPoint());
     emit mouseMoved(api.x, api.y);
     emit mouseButton(*btn, pressed);
     return true;
@@ -201,13 +267,7 @@ bool VideoWindow::handleMouseButton(QMouseEvent* ev, bool pressed) {
 
 bool VideoWindow::handleMouseMove(QMouseEvent* ev) {
     if (!m_captured) return false;
-    const auto api = transformToApi({
-        ev->globalPosition().toPoint(),
-        frameGeometry(),
-        m_video->geometry(),
-        m_targetMonitor,
-        m_logicalDesktop,
-    });
+    const auto api = apiCoordForCursor(ev->globalPosition().toPoint());
     emit mouseMoved(api.x, api.y);
     return true;
 }
@@ -223,6 +283,18 @@ bool VideoWindow::handleWheel(QWheelEvent* ev) {
 }
 
 bool VideoWindow::handleKey(QKeyEvent* ev, bool pressed) {
+    // Fullscreen toggle: works whether captured or not. While captured,
+    // grabKeyboard routes the press here and bypasses the QShortcut
+    // installed in setCaptureContext, so we re-check the combo here.
+    // Pressed-only — the matching release is harmless to drop.
+    if (pressed && m_fullscreenHotkey != 0) {
+        const int combo = int(ev->modifiers() & Qt::KeyboardModifierMask) | ev->key();
+        if (combo == m_fullscreenHotkey) {
+            toggleFullscreen();
+            return true;
+        }
+    }
+
     if (!m_captured) return false;
 
     // Release hotkey on key-down: stop capture and swallow the event. The

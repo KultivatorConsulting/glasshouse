@@ -130,6 +130,10 @@ int main(int argc, char** argv) {
     if (releaseHotkey.isEmpty()) {
         releaseHotkey = QStringLiteral("Ctrl+Alt+Shift+Escape");
     }
+    QString fullscreenHotkey = cfg.fullscreen_hotkey;
+    if (fullscreenHotkey.isEmpty()) {
+        fullscreenHotkey = QStringLiteral("F11");
+    }
     const QString onlyHost = parser.value(onlyOpt);
 
     // ------------------------------------------------------------------
@@ -167,7 +171,7 @@ int main(int argc, char** argv) {
         inst.window->setConnectionStatus(QStringLiteral("%1: authenticating…")
                                              .arg(inst.host));
         inst.window->setCaptureContext(inst.monitorRect, cfg.logical_desktop,
-                                       releaseHotkey);
+                                       releaseHotkey, fullscreenHotkey);
         if (w.geometry.width() > 0 && w.geometry.height() > 0) {
             inst.window->setGeometry(w.geometry);
         }
@@ -337,17 +341,10 @@ int main(int argc, char** argv) {
         QObject::connect(inst.window, &VideoWindow::keyEvent,
                          router, &InputRouter::routeKey);
 
-        // Single-capture enforcement: when this window enters capture,
-        // every other window must release. captures are mutually
-        // exclusive (a single physical mouse / kbd cannot drive two
-        // simultaneous captures anyway).
-        QObject::connect(inst.window, &VideoWindow::captureStateChanged, &app,
-            [i, &instances](bool on) {
-                if (!on) return;
-                for (int j = 0; j < instances.size(); ++j) {
-                    if (j != i) instances[j].window->stopCapture();
-                }
-            });
+        // Capture is session-wide; whichever window the user clicked
+        // becomes the holder. The holder shows "capture ON"; siblings
+        // keep their normal status. No cross-window release needed —
+        // there's only one Qt grab in flight at a time.
         QObject::connect(inst.window, &VideoWindow::captureStateChanged, inst.window,
             [&inst](bool on) {
                 inst.window->setConnectionStatus(on
@@ -355,6 +352,15 @@ int main(int argc, char** argv) {
                           .arg(inst.host)
                     : QStringLiteral("%1: capture OFF").arg(inst.host));
             });
+    }
+
+    // Tell every window about every other window so the holder's
+    // sibling-aware transform lookup works. Cheap O(N²) loop — N is
+    // tiny (usually 2 or 3).
+    {
+        QList<QPointer<VideoWindow>> all;
+        for (auto& inst : instances) all.append(QPointer<VideoWindow>(inst.window));
+        for (auto& inst : instances) inst.window->setSiblings(all);
     }
 
     // ------------------------------------------------------------------
