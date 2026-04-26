@@ -77,6 +77,23 @@ public:
     // server has its own debouncing. Auth uses the existing cookie jar.
     void atxClick(const QString& button);
 
+    // Mass Storage Device control. State observation is via the existing
+    // `rawStateEvent("msd_state", ...)` emission on the state WS.
+    //
+    // - msdSetConnected: POST /api/msd/set_connected?connected=0|1
+    // - msdSetParams:    POST /api/msd/set_params?image=…&cdrom=0|1&rw=0|1
+    // - msdRemove:       POST /api/msd/remove?image=…
+    // - msdUpload:       POST /api/msd/write?image=… body=`file` contents.
+    //                    Streams `file` to the server via QNAM; emits
+    //                    msdUploadProgress / msdUploadFinished. The
+    //                    QIODevice's lifetime must outlive the upload —
+    //                    parent it to `this` or delete it in the
+    //                    msdUploadFinished handler.
+    void msdSetConnected(bool connected);
+    void msdSetParams(const QString& image, bool cdrom, bool rw);
+    void msdRemove(const QString& image);
+    void msdUpload(const QString& imageName, QIODevice* file);
+
 signals:
     void authenticated();
     void connected();
@@ -90,6 +107,11 @@ signals:
     void rawStateEvent(const QString& type, const QJsonObject& event);
     void disconnected(const QString& reason);
     void errorOccurred(const QString& msg);
+
+    // MSD upload progress and completion. `total` may be -1 if the server
+    // didn't report a content-length (uncommon).
+    void msdUploadProgress(qint64 sent, qint64 total);
+    void msdUploadFinished(bool ok, const QString& reason);
 
 private slots:
     void onLoginFinished();

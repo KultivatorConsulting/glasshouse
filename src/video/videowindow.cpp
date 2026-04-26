@@ -136,6 +136,10 @@ void VideoWindow::buildMenuBar() {
                        QStringLiteral("reset"));
     });
 
+    targetMenu->addSeparator();
+    auto* msdAct = targetMenu->addAction(QStringLiteral("&Mass Storage…"));
+    connect(msdAct, &QAction::triggered, this, &VideoWindow::showMsdRequested);
+
     // ---- Help ----
     auto* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
     auto* aboutAct = helpMenu->addAction(QStringLiteral("&About Glasshouse Viewer"));

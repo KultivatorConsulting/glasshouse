@@ -4,6 +4,7 @@ qt_add_library(glasshouse_video STATIC
     videowindow.h       videowindow.cpp
     janusclient.h       janusclient.cpp
     specialkeysdialog.h specialkeysdialog.cpp
+    msddialog.h         msddialog.cpp
 )
 
 target_link_libraries(glasshouse_video

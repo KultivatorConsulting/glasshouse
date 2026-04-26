@@ -7,6 +7,7 @@
 #include "janusclient.h"
 #include "logging.h"
 #include "mjpegpipeline.h"
+#include "msddialog.h"
 #include "pikvmclient.h"
 #include "secrets.h"
 #include "specialkeysdialog.h"
@@ -303,6 +304,12 @@ int main(int argc, char** argv) {
     QObject::connect(specialKeys, &SpecialKeysDialog::typeText,
                      router, &InputRouter::routeTypeText);
 
+    // One MSD dialog tied to the HID master (the PiKVM whose mass
+    // storage hardware is wired to the target — same box for the same
+    // target in our supported topology). Toggled from any window's
+    // Target → Mass Storage… menu item.
+    auto* msdDialog = new MsdDialog(master->pk, nullptr);
+
     // ------------------------------------------------------------------
     // Per-instance signal wiring (auth → pipeline → Janus → router).
     // ------------------------------------------------------------------
@@ -478,6 +485,10 @@ int main(int argc, char** argv) {
         // VideoWindow's QMessageBox before this fires.
         QObject::connect(inst.window, &VideoWindow::atxClickRequested,
                          router, &InputRouter::routeAtxClick);
+
+        // Target → Mass Storage… opens (or hides) the shared MsdDialog.
+        QObject::connect(inst.window, &VideoWindow::showMsdRequested,
+                         msdDialog, &MsdDialog::toggle);
     }
 
     // Tell every window about every other window so the holder's
@@ -512,6 +523,7 @@ int main(int argc, char** argv) {
         delete inst.wallClock;
     }
     delete specialKeys;
+    delete msdDialog;
 
     // Tear down file logging cleanly so the last few log lines hit disk.
     if (g_logStream) {

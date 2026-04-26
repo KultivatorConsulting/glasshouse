@@ -361,6 +361,114 @@ void PiKvmClient::sendShortcut(const QStringList& keys) {
     for (auto it = keys.rbegin(); it != keys.rend(); ++it) sendKey(*it, false);
 }
 
+namespace {
+
+// All MSD endpoints share the same auth + insecure-tls handling. This
+// helper wires that up around an arbitrary POST.
+QNetworkReply* postEmpty(QNetworkAccessManager* nam, const QUrl& url,
+                         bool insecureTls) {
+    QNetworkRequest req(url);
+    QNetworkReply* reply = nam->post(req, QByteArray());
+    if (insecureTls) {
+        QObject::connect(reply, &QNetworkReply::sslErrors,
+                         reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+    }
+    return reply;
+}
+
+}  // namespace
+
+void PiKvmClient::msdSetConnected(bool connected) {
+    if (m_authCookie.isEmpty()) return;
+    QUrl url(QStringLiteral("https://%1/api/msd/set_connected").arg(m_opts.host));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("connected"), connected ? "1" : "0");
+    url.setQuery(q);
+    QNetworkReply* reply = postEmpty(m_nam.get(), url, m_opts.insecure_tls);
+    connect(reply, &QNetworkReply::finished, reply, [reply, this, connected]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qCWarning(lcPikvm) << m_opts.host << "msd set_connected="
+                               << connected << "failed:" << reply->errorString();
+        }
+    });
+}
+
+void PiKvmClient::msdSetParams(const QString& image, bool cdrom, bool rw) {
+    if (m_authCookie.isEmpty()) return;
+    QUrl url(QStringLiteral("https://%1/api/msd/set_params").arg(m_opts.host));
+    QUrlQuery q;
+    if (!image.isEmpty()) q.addQueryItem(QStringLiteral("image"), image);
+    q.addQueryItem(QStringLiteral("cdrom"), cdrom ? "1" : "0");
+    q.addQueryItem(QStringLiteral("rw"),    rw    ? "1" : "0");
+    url.setQuery(q);
+    QNetworkReply* reply = postEmpty(m_nam.get(), url, m_opts.insecure_tls);
+    connect(reply, &QNetworkReply::finished, reply, [reply, this, image]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qCWarning(lcPikvm) << m_opts.host << "msd set_params image=" << image
+                               << "failed:" << reply->errorString();
+        }
+    });
+}
+
+void PiKvmClient::msdRemove(const QString& image) {
+    if (m_authCookie.isEmpty() || image.isEmpty()) return;
+    QUrl url(QStringLiteral("https://%1/api/msd/remove").arg(m_opts.host));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("image"), image);
+    url.setQuery(q);
+    QNetworkReply* reply = postEmpty(m_nam.get(), url, m_opts.insecure_tls);
+    connect(reply, &QNetworkReply::finished, reply, [reply, this, image]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qCWarning(lcPikvm) << m_opts.host << "msd remove image=" << image
+                               << "failed:" << reply->errorString();
+        }
+    });
+}
+
+void PiKvmClient::msdUpload(const QString& imageName, QIODevice* file) {
+    if (m_authCookie.isEmpty() || !file) {
+        emit msdUploadFinished(false, QStringLiteral("not authenticated or no file"));
+        return;
+    }
+    if (!file->isOpen() && !file->open(QIODevice::ReadOnly)) {
+        emit msdUploadFinished(false,
+            QStringLiteral("cannot open upload source: %1").arg(file->errorString()));
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://%1/api/msd/write").arg(m_opts.host));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("image"), imageName);
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader,
+                  QStringLiteral("application/octet-stream"));
+    // QNAM streams the QIODevice — no full-buffer materialisation, so a
+    // multi-GB ISO works without spiking memory.
+    QNetworkReply* reply = m_nam->post(req, file);
+    if (m_opts.insecure_tls) {
+        connect(reply, &QNetworkReply::sslErrors,
+                reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+    }
+    connect(reply, &QNetworkReply::uploadProgress, this,
+            &PiKvmClient::msdUploadProgress);
+    connect(reply, &QNetworkReply::finished, reply, [reply, this, imageName]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qCWarning(lcPikvm) << m_opts.host << "msd upload" << imageName
+                               << "failed:" << reply->errorString();
+            emit msdUploadFinished(false, reply->errorString());
+        } else {
+            qCInfo(lcPikvm) << m_opts.host << "msd upload" << imageName << "OK";
+            emit msdUploadFinished(true, QString());
+        }
+    });
+}
+
 void PiKvmClient::atxClick(const QString& button) {
     if (m_authCookie.isEmpty()) {
         qCWarning(lcPikvm) << m_opts.host

@@ -96,6 +96,9 @@ signals:
     // QMessageBox. main.cpp routes through InputRouter to the HID master.
     // `button` ∈ {power, power_long, reset}.
     void atxClickRequested(const QString& button);
+    // Target → Mass Storage… menu item; main.cpp toggles the shared
+    // MsdDialog.
+    void showMsdRequested();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

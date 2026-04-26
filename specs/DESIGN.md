@@ -457,9 +457,27 @@ a custom `QtMessageHandler` that delegates to the default stderr handler
 ISO-timestamped lines to PATH. Append mode, no rotation — pair with
 `logrotate(8)` for long-running sessions.
 
+**Mass Storage menu item — done.** `Target → Mass Storage…` opens
+`MsdDialog`, a modal that subscribes to `PiKvmClient::rawStateEvent`
+filtering for `msd_state` frames. Surfaces enabled/online/busy, free /
+total storage, the active drive image, and the list of stored images.
+Buttons drive the kvmd HTTP API:
+
+- *Upload New Image…* — `QFileDialog` → `POST /api/msd/write?image=…`
+  with the file streamed via QNAM (multi-GB ISOs don't materialise in
+  RAM). `QProgressDialog` tracks bytes via `uploadProgress`.
+- *Use Selected* — `POST /api/msd/set_params?image=…&cdrom=…&rw=…`.
+- *Delete Selected* — `POST /api/msd/remove?image=…` after confirmation.
+- *Connect / Disconnect* — `POST /api/msd/set_connected?connected=0|1`.
+- *Present as CD-ROM* — toggles `set_params` `cdrom`/`rw` together.
+
+MSD always targets the HID master (the assumption being that whichever
+PiKVM drives the target's HID also has the MSD hardware wired) — for
+mixed topologies a per-PiKVM selector is a follow-up.
+
 Still TBD: systemd user-service unit for autostart (gated on the Qt
 distribution decision — autostart with a non-system Qt is brittle),
-MSD upload menu item, bundling Qt 6.7 with the .deb.
+bundling Qt 6.7 with the .deb.
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)
