@@ -25,6 +25,29 @@ verified coordinate model, component breakdown, and phase plan.
 router, letterboxing, polish — see [DESIGN.md §9](specs/DESIGN.md#9-phase-plan)
 for the full phase plan.
 
+## Install (from a release .deb)
+
+Tagged releases publish a `.deb` to
+[GitHub Releases](https://github.com/kultivator-consulting/glasshouse/releases).
+Download the `glasshouse-viewer_<version>_amd64.deb` for your release and
+install with:
+
+```bash
+sudo apt install ./glasshouse-viewer_<version>_amd64.deb
+```
+
+`apt install` (vs. `dpkg -i`) resolves the GStreamer / libnice apt
+dependencies in one step.
+
+> **Qt 6.7 prerequisite.** The current `.deb` does not bundle Qt and Ubuntu
+> 24.04's archive ships only Qt 6.4. Install Qt 6.7 per-user via aqt before
+> running the viewer (see [Installing Qt 6.7 without touching the system](#installing-qt-67-without-touching-the-system)
+> below). Bundling Qt with the package is on the todo list.
+
+The package drops an example config at
+`/etc/xdg/glasshouse/glasshouse-viewer.example.yaml` — copy it to
+`~/.config/glasshouse/config.yaml` and edit.
+
 ## Project layout
 
 ```
@@ -222,9 +245,8 @@ or re-enable the opt-in.
 
 ## License
 
-The Glasshouse source code itself is currently unlicensed (TBD).
-
-This project links Qt 6 dynamically under LGPL v3 (plus The Qt Company's
-GPLv3 exception). The canonical LGPL-3.0 text is included at
-[`LICENSES/LGPL-3.0.txt`](LICENSES/LGPL-3.0.txt). LGPL-3.0 incorporates
-GPL-3.0 by reference — see <https://www.gnu.org/licenses/gpl-3.0.html>.
+The Glasshouse source code is licensed under
+[**LGPL-3.0-or-later**](LICENSES/LGPL-3.0.txt), matching the dynamic Qt 6
+linkage requirement (Qt 6 is LGPL v3 with The Qt Company's GPLv3
+exception). LGPL-3.0 incorporates GPL-3.0 by reference — see
+<https://www.gnu.org/licenses/gpl-3.0.html>.

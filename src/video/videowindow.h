@@ -65,6 +65,10 @@ public:
     // cursor is currently over the sibling.
     ApiCoord transformFor(const QPoint& globalPos) const;
 
+    // Used as the QSettings key root for geometry persistence (one slot
+    // per PiKVM host so multiple windows don't trample each other).
+    void setPersistenceHost(const QString& host) { m_persistHost = host; }
+
 public slots:
     void setConnectionStatus(const QString& text);
     void setDecoderLabel(const QString& decoder);
@@ -121,6 +125,7 @@ private:
     QLabel*       m_decoderLabel  = nullptr;
     QLabel*       m_latencyLabel  = nullptr;
 
+    QString       m_persistHost;
     QRect         m_targetMonitor;
     QSize         m_logicalDesktop;
     // Single-chord hotkeys, encoded as (Qt::Key | modifiers). 0 = unset.

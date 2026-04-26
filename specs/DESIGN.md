@@ -245,7 +245,7 @@ parameterized.
 | Video transport | H.264 over WebRTC via Janus (`/janus/ws`, plugin `janus.plugin.ustreamer`) | The only H.264 path stock PiKVM exposes; see §10.5 |
 | HTTP/WS | Qt's QNetworkAccessManager + QWebSocket | In-tree, no extra deps |
 | Config | YAML via `yaml-cpp` | Hand-editable |
-| Packaging | `.deb` built with `nfpm` | Matches existing Jenkins/multi-format workflow |
+| Packaging | `.deb` built with `nfpm` | `dist/nfpm.yaml`; built and published by `.github/workflows/release.yml` on `v*` tag pushes |
 | Build system | CMake | Qt6 convention |
 
 ### 7.1 Required Ubuntu packages
@@ -432,10 +432,19 @@ Graceful degradation: status-bar messages already cover "reconnecting…"
 without an in-video overlay; left as-is until field testing surfaces a
 specific gap.
 
-### Phase 7 — Polish
-Persist window positions, cleanup on exit, logging, systemd
-user-service unit. Menu items for common PiKVM actions (reboot
-target, open MSD upload, etc.) as additive features.
+### Phase 7 — Polish (in progress)
+
+**Window-position persistence — done.** `VideoWindow::closeEvent`
+saves `saveGeometry()` (position, size, maximized / fullscreen flag —
+one QByteArray) into `QSettings` under `windows/<host>/geometry`. On
+startup main.cpp picks geometry by precedence:
+explicit YAML `windows[].geometry` (override) > saved QSettings slot
+(last-known) > Qt default. The QSettings file lives at
+`~/.config/glasshouse/glasshouse-viewer.conf`.
+
+Still TBD: in-process logging tweaks (file handler / rotation),
+systemd user-service unit for autostart, menu items for kvmd ATX
+reset / MSD upload / reboot-target affordances.
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)

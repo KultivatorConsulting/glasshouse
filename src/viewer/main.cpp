@@ -17,6 +17,7 @@
 #include <QCommandLineParser>
 #include <QElapsedTimer>
 #include <QPointer>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
@@ -179,8 +180,18 @@ int main(int argc, char** argv) {
         inst.window->setCaptureContext(inst.monitorRect, cfg.logical_desktop,
                                        releaseHotkey, fullscreenHotkey,
                                        specialKeysHotkey);
+        inst.window->setPersistenceHost(inst.host);
+
+        // Geometry precedence: explicit YAML override > last saved
+        // QSettings slot > Qt's default 1280x720 (constructor).
         if (w.geometry.width() > 0 && w.geometry.height() > 0) {
             inst.window->setGeometry(w.geometry);
+        } else {
+            QSettings s;
+            const QByteArray saved = s.value(
+                QStringLiteral("windows/%1/geometry").arg(inst.host))
+                .toByteArray();
+            if (!saved.isEmpty()) inst.window->restoreGeometry(saved);
         }
 
         if (inst.transport == VideoTransport::Janus) {

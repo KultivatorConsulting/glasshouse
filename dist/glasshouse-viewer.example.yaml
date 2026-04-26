@@ -1,0 +1,68 @@
+# glasshouse-viewer example config.
+#
+# Copy this file to ~/.config/glasshouse/config.yaml (or pass --config) and
+# fill in your PiKVM hosts and credentials. See specs/DESIGN.md §8 for the
+# full schema.
+
+target:
+  # Total combined logical desktop size on the *target* machine (the
+  # combined extents of every HDMI output that's running through one of
+  # your PiKVMs). PiKVM API coords are mapped against this.
+  logical_desktop:
+    width: 3840
+    height: 1080
+
+  # One entry per target monitor. `pikvm` is the IP/hostname of the
+  # PiKVM whose HDMI input is wired to that target monitor.
+  monitors:
+    - id: 1
+      origin: [0, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.71
+    - id: 2
+      origin: [1920, 0]
+      size: [1920, 1080]
+      pikvm: 192.168.1.144
+
+# Which PiKVM is plugged into the target's USB HID — input from every
+# window routes here.
+hid_master: 192.168.1.71
+
+# Per-host auth and video transport. transport=mjpeg for older PiKVM
+# images that don't ship Janus; transport=janus (default) for PiKVM 4.
+auth:
+  192.168.1.71:
+    user: admin
+    password_ref: secret://pikvm-71-passwd
+    insecure_tls: true
+    # transport: janus    # default
+  192.168.1.144:
+    user: admin
+    password_ref: secret://pikvm-144-passwd
+    insecure_tls: true
+    transport: mjpeg
+
+# Hotkeys. Empty / missing values fall back to the defaults shown.
+release_hotkey:      "Ctrl+Alt+Shift+Escape"
+fullscreen_hotkey:   "F11"
+special_keys_hotkey: "Ctrl+Alt+K"
+
+# Optional. Each entry produces a button in the Special Keys palette's
+# Custom tab (and is the source of truth for the future macro-pad daemon).
+shortcuts:
+  - label: "Open terminal"
+    keys: [ControlLeft, AltLeft, KeyT]
+  - label: "Lock session"
+    keys: [MetaLeft, KeyL]
+
+video:
+  prefer_hw_decode: true
+  target_fps: 60
+
+# One window per target monitor. `geometry` is optional — leave it out
+# and the window remembers its last position via QSettings (per-host).
+windows:
+  - target_monitor: 1
+    geometry: { x: 0,    y: 0, w: 1280, h: 720 }
+  - target_monitor: 2
+    geometry: { x: 1280, y: 0, w: 1280, h: 720 }

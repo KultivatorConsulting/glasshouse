@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Glasshouse Viewer
+GenericName=PiKVM Multi-Screen Viewer
+Comment=Native Linux client for one or more PiKVM remote consoles
+Exec=glasshouse-viewer
+Icon=glasshouse-viewer
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=KVM;PiKVM;remote;
+StartupNotify=true

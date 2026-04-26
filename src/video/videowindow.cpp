@@ -10,6 +10,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QSettings>
 #include <QShortcut>
 #include <QStatusBar>
 #include <QTimer>
@@ -251,6 +252,15 @@ void VideoWindow::stopCapture() {
 
 void VideoWindow::closeEvent(QCloseEvent* ev) {
     if (m_captured) stopCapture();
+    if (!m_persistHost.isEmpty()) {
+        // saveGeometry packages position, size, and the maximized /
+        // fullscreen flag in a single QByteArray; restoreGeometry
+        // unpacks all three on next launch. Per-host key avoids two
+        // PiKVM windows clobbering each other's slots.
+        QSettings s;
+        s.setValue(QStringLiteral("windows/%1/geometry").arg(m_persistHost),
+                   saveGeometry());
+    }
     QMainWindow::closeEvent(ev);
 }
 
