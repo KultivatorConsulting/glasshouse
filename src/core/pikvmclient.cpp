@@ -203,7 +203,14 @@ void PiKvmClient::onLoginFinished() {
 }
 
 void PiKvmClient::openWebSocket() {
-    // Drop any previous instance; signals from it are gone with it.
+    // Detach the slots from any previous instance *before* it gets
+    // destroyed by the assignment below. QWebSocket emits disconnected
+    // from its close path during destruction; without this disconnect
+    // that final signal would route into onWsDisconnected and trigger a
+    // spurious scheduleReconnect() — which on top of an already-running
+    // re-auth cascade produces a doubled "authenticating" / pipeline
+    // start per external start() call.
+    if (m_ws) m_ws->disconnect(this);
     m_ws = std::make_unique<QWebSocket>();
 
     connect(m_ws.get(), &QWebSocket::connected,

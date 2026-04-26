@@ -109,6 +109,14 @@ struct Instance {
     MjpegPipeline*   mjpeg     = nullptr;
 
     QElapsedTimer*   wallClock = nullptr;
+
+    // Set when an error has scheduled a re-auth + rebuild via QTimer;
+    // cleared in the authenticated handler once the rebuild has run.
+    // Without this, a single failed pipeline-start that fires multiple
+    // GStreamer errors (e.g. 502 → internal-data-stream-error → EOS)
+    // queues N concurrent re-auths, each of which rebuilds the
+    // pipeline and produces another N errors — exponential storm.
+    bool             reconnectScheduled = false;
 };
 
 // Look up the MonitorRect for a given window spec.
@@ -366,6 +374,12 @@ int main(int argc, char** argv) {
                 if (inst.webrtc) inst.webrtc->stop();
                 if (inst.mjpeg)  inst.mjpeg->stop();
 
+                // We made it through to a fresh auth — clear the
+                // reconnect-scheduled gate so future errors can queue
+                // a new cycle. (No-op on the very first authenticated
+                // event, since the gate started at false.)
+                inst.reconnectScheduled = false;
+
                 inst.window->setConnectionStatus(
                     QStringLiteral("%1: authenticated, starting pipeline")
                         .arg(inst.host));
@@ -414,10 +428,11 @@ int main(int argc, char** argv) {
                                 QStringLiteral("%1: Janus session failed (%2) "
                                                "— reconnecting…")
                                     .arg(inst.host, reason));
-                            // Re-auth after a small breather. The auth
-                            // handler tears down stale state and rebuilds.
-                            // PiKvmClient's own backoff handles network
-                            // bumps if /api/auth/login itself is down.
+                            // Dedupe: only one re-auth in flight per
+                            // instance. Cleared in the authenticated
+                            // handler when rebuild is done.
+                            if (inst.reconnectScheduled) return;
+                            inst.reconnectScheduled = true;
                             QTimer::singleShot(2000, &app, [&inst]() {
                                 inst.pk->start();
                             });
@@ -473,6 +488,12 @@ int main(int argc, char** argv) {
                     inst.window->setConnectionStatus(
                         QStringLiteral("%1: pipeline error: %2 — reconnecting…")
                             .arg(inst.host, msg));
+                    // GStreamer can fire 3+ errors per failed pipeline
+                    // (transport error → internal-stream-error → EOS-no-pads).
+                    // Without this gate each becomes its own queued
+                    // re-auth and the rebuilds compound exponentially.
+                    if (inst.reconnectScheduled) return;
+                    inst.reconnectScheduled = true;
                     QTimer::singleShot(2000, &app, [&inst]() {
                         inst.pk->start();
                     });
