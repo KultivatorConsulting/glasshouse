@@ -19,6 +19,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QMessageBox>
 #include <QPointer>
 #include <QSettings>
 #include <QStandardPaths>
@@ -40,6 +41,15 @@ void errln(const QString& s) {
     QTextStream err(stderr);
     err << s << '\n';
     err.flush();
+}
+
+// Startup-failure announcer. errln so the message lands on stderr for
+// terminal launches, plus a modal QMessageBox so a desktop launch
+// (KDE menu, .desktop double-click) actually surfaces the reason —
+// without it the process disappears with no UI feedback at all.
+void fatal(const QString& title, const QString& body) {
+    errln(body);
+    QMessageBox::critical(nullptr, title, body);
 }
 
 // File-logging glue. Active only when --log-file is passed; otherwise
@@ -109,21 +119,28 @@ const MonitorRect* findMonitor(const Config& cfg, int targetMonitorId) {
 }
 
 // Resolve secrets for a PiKVM's auth entry. Returns std::nullopt and
-// writes diagnostic to stderr on failure.
+// surfaces a diagnostic via fatal() on failure (stderr + QMessageBox).
 std::optional<std::pair<QString, QString>>
 resolveSecrets(const QString& host, const AuthSpec& a) {
     const auto password = SecretResolver::resolve(a.password_ref);
     if (!password) {
-        errln(QStringLiteral("cannot resolve password_ref for %1 (%2)")
-                  .arg(host, a.password_ref));
+        fatal(QStringLiteral("Glasshouse — secret missing"),
+              QStringLiteral("Cannot resolve password_ref for %1 (%2).\n\n"
+                             "Set it in either:\n"
+                             "  • environment variable %3, or\n"
+                             "  • ~/.config/glasshouse/secrets.yaml "
+                             "(map of name: plaintext, chmod 0600)")
+                  .arg(host, a.password_ref,
+                       SecretResolver::envKeyForRef(a.password_ref)));
         return std::nullopt;
     }
     QString totp;
     if (!a.totp_secret_ref.isEmpty()) {
         const auto t = SecretResolver::resolve(a.totp_secret_ref);
         if (!t) {
-            errln(QStringLiteral("cannot resolve totp_secret_ref for %1")
-                      .arg(host));
+            fatal(QStringLiteral("Glasshouse — secret missing"),
+                  QStringLiteral("Cannot resolve totp_secret_ref for %1 (%2).")
+                      .arg(host, a.totp_secret_ref));
             return std::nullopt;
         }
         totp = *t;
@@ -182,8 +199,10 @@ int main(int argc, char** argv) {
 
     const auto result = loadConfig(parser.value(configOpt));
     if (!result.ok()) {
-        errln(QStringLiteral("config load failed:"));
-        for (const auto& e : result.errors) errln(QStringLiteral("  - ") + e);
+        QStringList lines{QStringLiteral("Config load failed (%1):")
+                              .arg(parser.value(configOpt))};
+        for (const auto& e : result.errors) lines << QStringLiteral("  • ") + e;
+        fatal(QStringLiteral("Glasshouse — config error"), lines.join('\n'));
         return 1;
     }
     const Config cfg = *result.config;
@@ -210,7 +229,9 @@ int main(int argc, char** argv) {
     for (const auto& w : cfg.windows) {
         const MonitorRect* monitor = findMonitor(cfg, w.target_monitor);
         if (!monitor) {
-            errln(QStringLiteral("windows[].target_monitor=%1 not found")
+            fatal(QStringLiteral("Glasshouse — config error"),
+                  QStringLiteral("windows[].target_monitor=%1 does not match "
+                                 "any target.monitors[].id")
                       .arg(w.target_monitor));
             return 2;
         }
@@ -218,7 +239,10 @@ int main(int argc, char** argv) {
 
         const auto authIt = cfg.auth.constFind(monitor->pikvm);
         if (authIt == cfg.auth.constEnd()) {
-            errln(QStringLiteral("no auth entry for %1").arg(monitor->pikvm));
+            fatal(QStringLiteral("Glasshouse — config error"),
+                  QStringLiteral("No auth entry for %1.\n\n"
+                                 "Add an `auth.\"%1\"` block to your config.")
+                      .arg(monitor->pikvm));
             return 2;
         }
         const AuthSpec& a = *authIt;
@@ -272,8 +296,9 @@ int main(int argc, char** argv) {
     }
 
     if (instances.isEmpty()) {
-        errln(QStringLiteral("no windows to bring up "
-                             "(check config.windows / --only filter)"));
+        fatal(QStringLiteral("Glasshouse — nothing to show"),
+              QStringLiteral("No windows to bring up. "
+                             "Check config.windows[] and the --only filter."));
         return 1;
     }
 
@@ -285,9 +310,10 @@ int main(int argc, char** argv) {
         if (inst.host == cfg.hid_master) { master = &inst; break; }
     }
     if (!master) {
-        errln(QStringLiteral(
-            "hid_master=%1 not in the running window set "
-            "(--only filter excluded it?)").arg(cfg.hid_master));
+        fatal(QStringLiteral("Glasshouse — config error"),
+              QStringLiteral("hid_master=%1 is not in the running window set. "
+                             "(Did the --only filter exclude it?)")
+                  .arg(cfg.hid_master));
         return 2;
     }
     auto* router = new InputRouter(master->pk, &app);

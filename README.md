@@ -128,9 +128,20 @@ the validator enforces the five rules in §8.1.
 ### Secrets
 
 Passwords and TOTP seeds live outside the config file. The config uses
-`secret://<name>` references that resolve to env vars of the form
-`GLASSHOUSE_SECRET_<NAME>` (uppercased, non-alphanumerics replaced with
-`_`). For example `secret://pikvm-1-passwd` → `GLASSHOUSE_SECRET_PIKVM_1_PASSWD`.
+`secret://<name>` references that resolve in this order:
+
+1. **Environment variable** `GLASSHOUSE_SECRET_<NAME>` — uppercased,
+   non-alphanumerics replaced with `_`.
+   `secret://pikvm-1-passwd` → `GLASSHOUSE_SECRET_PIKVM_1_PASSWD`.
+2. **`~/.config/glasshouse/secrets.yaml`** — YAML map of the part after
+   `secret://` to plaintext. Used when the env var is unset; this is the
+   path that survives KDE-menu / `.desktop` launches where shell rc
+   files don't get sourced.
+
+Either form works on its own. Env wins when both are set, so an
+ad-hoc shell session can override the on-disk file without editing it.
+
+**Environment**:
 
 ```bash
 export GLASSHOUSE_SECRET_PIKVM_1_PASSWD='...'
@@ -139,7 +150,21 @@ export GLASSHOUSE_SECRET_PIKVM_2_PASSWD='...'
 export GLASSHOUSE_SECRET_PIKVM_1_TOTP='...'
 ```
 
-KWallet / libsecret integration is a Phase 6/7 concern.
+**File** (preferred for desktop / KDE-menu launches):
+
+```bash
+mkdir -p ~/.config/glasshouse
+cat > ~/.config/glasshouse/secrets.yaml <<'EOF'
+pikvm-71-passwd: hunter2
+pikvm-144-passwd: hunter2
+# pikvm-71-totp:    JBSWY3DPEHPK3PXP   # optional base32 TOTP seed
+EOF
+chmod 0600 ~/.config/glasshouse/secrets.yaml
+```
+
+The viewer warns at startup if the file's permissions allow group or
+other access. KWallet / libsecret integration is still a future
+enhancement.
 
 ## Running the CLI harness
 
