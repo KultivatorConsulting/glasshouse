@@ -484,8 +484,16 @@ target system Qt 6.4: build deps are `qt6-base-dev / qt6-multimedia-dev
 side-by-side aqt install, no LD_LIBRARY_PATH dance. Local development
 can still use a newer Qt via aqt — 6.4 is the *minimum*, not a pin.
 
-Still TBD: systemd user-service unit for autostart (now unblocked since
-the Qt path matches a normal apt install).
+**Systemd user-service unit — deliberately skipped.** Glasshouse Viewer
+is an interactive multi-window viewer, not a daemon. KDE's
+*System Settings → Startup and Shutdown → Autostart* picks up the
+`.desktop` entry the .deb already installs, which is the right path
+for users who actually want autostart. Re-evaluate if a "headless
+always-on" deployment use case ever materialises.
+
+Phase 7 is substantially complete. The remaining todo (a code-review
+cleanup-on-exit audit) is low-value polish and not on the critical
+path.
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)
