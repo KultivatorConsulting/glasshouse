@@ -19,6 +19,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QIcon>
 #include <QMessageBox>
 #include <QPointer>
 #include <QSettings>
@@ -156,6 +157,13 @@ int main(int argc, char** argv) {
     QCoreApplication::setOrganizationName(QStringLiteral("glasshouse"));
     QCoreApplication::setApplicationVersion(
         QStringLiteral(GLASSHOUSE_VERSION));
+
+    // Pick up the MDI greenhouse glyph the .deb installs into
+    // /usr/share/icons/hicolor/scalable/apps/. fromTheme() returns a
+    // null QIcon if the theme path isn't populated (dev builds without
+    // the .deb installed) — setWindowIcon on a null icon is a no-op,
+    // so we don't bother gating the call.
+    app.setWindowIcon(QIcon::fromTheme(QStringLiteral("glasshouse-viewer")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral(

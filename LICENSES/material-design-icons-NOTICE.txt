@@ -1,0 +1,17 @@
+Glasshouse Viewer ships an application icon
+(`/usr/share/icons/hicolor/scalable/apps/glasshouse-viewer.svg` —
+the MDI `greenhouse` glyph) sourced from the Material Design Icons
+project, used unmodified.
+
+Material Design Icons
+  Source:   https://github.com/Templarian/MaterialDesign
+  Web:      https://pictogrammers.com/library/mdi/
+  License:  Apache License 2.0
+            https://www.apache.org/licenses/LICENSE-2.0
+
+This NOTICE file is provided to satisfy the Apache 2.0 attribution
+requirement. The Apache 2.0 license text itself can be obtained at
+the URL above; it is not included in the .deb to keep the package
+small.
+
+No modifications were made to the icon's vector data.

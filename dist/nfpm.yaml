@@ -62,6 +62,20 @@ contents:
     file_info:
       mode: 0644
 
+  # MDI 'greenhouse' glyph as the app icon. Hicolor scalable theme path
+  # — KDE / GNOME / XFCE all pick it up when QIcon::fromTheme(name)
+  # resolves against the freedesktop icon-naming spec.
+  - src: ./dist/glasshouse-viewer.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/glasshouse-viewer.svg
+    file_info:
+      mode: 0644
+
+  # Apache-2.0 attribution for the bundled MDI icon.
+  - src: ./LICENSES/material-design-icons-NOTICE.txt
+    dst: /usr/share/doc/glasshouse-viewer/material-design-icons-NOTICE.txt
+    file_info:
+      mode: 0644
+
   # Debian convention: copyright file under /usr/share/doc/<pkg>/copyright.
   - src: ./LICENSES/LGPL-3.0.txt
     dst: /usr/share/doc/glasshouse-viewer/copyright
