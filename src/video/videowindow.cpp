@@ -46,6 +46,11 @@ int encodeHotkey(const QString& s) {
 
 VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     m_video = new QVideoWidget(this);
+    // Explicit even though it's the default — the CoordTransform letterbox
+    // math in transformFor assumes Qt::KeepAspectRatio. If this ever
+    // changes (e.g. someone wants stretched fill), the math has to be
+    // updated alongside.
+    m_video->setAspectRatioMode(Qt::KeepAspectRatio);
     setCentralWidget(m_video);
     setWindowTitle(QStringLiteral("Glasshouse Viewer"));
     resize(1280, 720);
@@ -75,16 +80,21 @@ QVideoSink* VideoWindow::videoSink() const {
 void VideoWindow::setCaptureContext(const QRect& targetMonitor,
                                     const QSize& logicalDesktop,
                                     const QString& releaseHotkey,
-                                    const QString& fullscreenHotkey) {
-    m_targetMonitor    = targetMonitor;
-    m_logicalDesktop   = logicalDesktop;
-    m_releaseHotkey    = encodeHotkey(releaseHotkey);
-    m_fullscreenHotkey = encodeHotkey(fullscreenHotkey);
+                                    const QString& fullscreenHotkey,
+                                    const QString& specialKeysHotkey) {
+    m_targetMonitor     = targetMonitor;
+    m_logicalDesktop    = logicalDesktop;
+    m_releaseHotkey     = encodeHotkey(releaseHotkey);
+    m_fullscreenHotkey  = encodeHotkey(fullscreenHotkey);
+    m_specialKeysHotkey = encodeHotkey(specialKeysHotkey);
     if (m_releaseHotkey == 0 && !releaseHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable release_hotkey:" << releaseHotkey;
     }
     if (m_fullscreenHotkey == 0 && !fullscreenHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable fullscreen_hotkey:" << fullscreenHotkey;
+    }
+    if (m_specialKeysHotkey == 0 && !specialKeysHotkey.isEmpty()) {
+        qCWarning(lcHid) << "unparseable special_keys_hotkey:" << specialKeysHotkey;
     }
 
     // Pre-capture path: while no widget has Qt's keyboard grab, the
@@ -95,6 +105,12 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
         auto* sc = new QShortcut(QKeySequence(fullscreenHotkey), this);
         sc->setContext(Qt::WindowShortcut);
         connect(sc, &QShortcut::activated, this, &VideoWindow::toggleFullscreen);
+    }
+    if (m_specialKeysHotkey != 0) {
+        auto* sc = new QShortcut(QKeySequence(specialKeysHotkey), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated,
+                this, &VideoWindow::showSpecialKeysRequested);
     }
 }
 
@@ -129,19 +145,27 @@ ApiCoord VideoWindow::apiCoordForCursor(const QPoint& globalPos) const {
 }
 
 ApiCoord VideoWindow::transformFor(const QPoint& globalPos) const {
+    // Where the video actually paints inside the QVideoWidget — accounts
+    // for letterbox / pillarbox bars when the widget AR doesn't match
+    // the source AR. Falls back to the full widget rect before the first
+    // frame arrives (videoSize is invalid).
+    const QSize videoSize     = m_video->videoSink()
+                                    ? m_video->videoSink()->videoSize()
+                                    : QSize();
+    const QRect inWidget      = computeLetterbox(m_video->size(), videoSize);
+
     // Letterbox rect needs to be in window-frame coords (same space as
     // frameGeometry). m_video->geometry() is in QMainWindow content
-    // coords — i.e. relative to the central widget area, not the frame
-    // — so map the video widget's top-left through globals to compute
-    // its offset inside the frame. Without this, every transform is
-    // off by the title-bar (and any menu/toolbar) height.
-    const QPoint videoGlobalTL = m_video->mapToGlobal(QPoint(0, 0));
-    const QRect  frame         = frameGeometry();
-    const QRect  letterboxFrameLocal(
-        videoGlobalTL.x() - frame.x(),
-        videoGlobalTL.y() - frame.y(),
-        m_video->width(),
-        m_video->height());
+    // coords — relative to the central-widget area, not the frame — so
+    // map the video widget's top-left through globals to compute its
+    // offset inside the frame, then add the rendered-rect offset inside
+    // the widget on top.
+    const QPoint widgetGlobalTL = m_video->mapToGlobal(QPoint(0, 0));
+    const QRect  frame          = frameGeometry();
+    const QPoint widgetFrameTL  = widgetGlobalTL - frame.topLeft();
+    const QRect  letterboxFrameLocal(widgetFrameTL + inWidget.topLeft(),
+                                     inWidget.size());
+
     return transformToApi({
         globalPos,
         frame,
@@ -283,14 +307,19 @@ bool VideoWindow::handleWheel(QWheelEvent* ev) {
 }
 
 bool VideoWindow::handleKey(QKeyEvent* ev, bool pressed) {
-    // Fullscreen toggle: works whether captured or not. While captured,
-    // grabKeyboard routes the press here and bypasses the QShortcut
-    // installed in setCaptureContext, so we re-check the combo here.
-    // Pressed-only — the matching release is harmless to drop.
-    if (pressed && m_fullscreenHotkey != 0) {
+    // App-side hotkeys (fullscreen / special-keys palette): work
+    // whether captured or not. While captured, grabKeyboard routes the
+    // press here and bypasses the QShortcut installed in
+    // setCaptureContext, so we re-check the combo here. Pressed-only —
+    // the matching release is harmless to drop.
+    if (pressed) {
         const int combo = int(ev->modifiers() & Qt::KeyboardModifierMask) | ev->key();
-        if (combo == m_fullscreenHotkey) {
+        if (m_fullscreenHotkey != 0 && combo == m_fullscreenHotkey) {
             toggleFullscreen();
+            return true;
+        }
+        if (m_specialKeysHotkey != 0 && combo == m_specialKeysHotkey) {
+            emit showSpecialKeysRequested();
             return true;
         }
     }

@@ -320,8 +320,19 @@ auth:
     user: admin
     password_ref: secret://pikvm-2-passwd
 
-release_hotkey:    "Ctrl+Alt+Shift+Escape"   # ends session-wide capture
-fullscreen_hotkey: "F11"                     # toggles per-window fullscreen
+release_hotkey:      "Ctrl+Alt+Shift+Escape"   # ends session-wide capture
+fullscreen_hotkey:   "F11"                     # toggles per-window fullscreen
+special_keys_hotkey: "Ctrl+Alt+K"              # shows/hides Special Keys palette
+
+# Optional. Each entry produces a button on the palette's Custom tab,
+# and the same shape will be consumed by the macro-pad daemon when it
+# lands. `keys` is a list of MDN KeyboardEvent.code values — same as
+# PiKVM's send_shortcut endpoint expects (see kvmd/keymap.csv).
+shortcuts:
+  - label: "Open terminal"
+    keys: [ControlLeft, AltLeft, KeyT]
+  - label: "Lock session"
+    keys: [MetaLeft, KeyL]
 
 video:
   prefer_hw_decode: true    # VA-API; software fallback on init failure
@@ -378,10 +389,14 @@ Load YAML config, spawn N windows, InputRouter routes through the
 HID-master client. Validate with N=2, then test N=3 expansion as a
 pure config change (no code changes).
 
-### Phase 5 — Letterboxing + aspect ratio (half a day)
-Maintain video rect inside each window. Coord transform uses
-letterbox rect, not window rect. Aspect ratio mismatch no longer
-distorts cursor motion.
+### Phase 5 — Letterboxing + aspect ratio (half a day) — done
+`computeLetterbox(widgetSize, videoSize)` in `src/input/coord_transform.cpp`
+returns the rendered video rect inside a `Qt::KeepAspectRatio` widget;
+`VideoWindow::transformFor` queries `QVideoSink::videoSize()` on every
+event and feeds that rect (in frame-local coords) as the
+`CoordTransform` letterbox. Cursor in a letterbox/pillarbox bar clamps
+to the nearest video edge, matching how the video is actually painted.
+Falls back to the full widget rect before the first frame arrives.
 
 ### Phase 6 — Reliability (1 day)
 PiKVM disconnects/reconnects, video stall recovery, auth token
@@ -392,14 +407,42 @@ Persist window positions, cleanup on exit, logging, systemd
 user-service unit. Menu items for common PiKVM actions (reboot
 target, open MSD upload, etc.) as additive features.
 
+### Phase 8 — Special-keys palette + clipboard paste (1 day)
+A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)
+that solves the cases where the local compositor swallows a keypress
+before our captured window sees it (KDE Spectacle on Print Screen,
+Super-key combos, etc.) and gives the user clipboard-paste-as-
+keystrokes via PiKVM's `POST /api/hid/print` endpoint. Toggled by a
+configurable hotkey (default `Ctrl+Alt+K`). Three tabs:
+
+* **Keyboard** — full US-QWERTY on-screen keyboard with sticky-toggle
+  modifiers (Ctrl, Shift, Alt, Win, Caps). Click a non-modifier key →
+  `send_shortcut(active_modifiers + key)`.
+* **Shortcuts** — curated chord buttons (Ctrl+Alt+Del, Win+L, …) plus
+  a "Custom" section populated from `cfg.shortcuts` (label + keys[]).
+  The same shortcut-spec schema is reused by the future macro-pad
+  daemon, so a chord defined in YAML drives both the dialog button and
+  whichever physical key the keypad maps to it.
+* **Paste** — multiline editor + a "Type N chars" button that sends
+  the buffer through `POST /api/hid/print`, with optional slow / delay
+  knobs for picky BIOS prompts. Server-side keymap conversion applies,
+  so the *target's* layout is what determines what gets typed.
+
+Routing goes through the same `InputRouter` as the rest of HID, so
+the dialog targets the configured HID master regardless of which
+window had focus when it was opened. Opening the palette releases
+the parent window's keyboard grab (Qt focus semantics) — the user
+re-clicks a window to re-capture.
+
 ### Out of scope for v1
 * Clipboard sync between local and target.
 * Audio (microphone to target, speaker from target).
 * MSD / virtual media upload (trivial to add later via existing API).
 * ATX power control (trivial to add later).
-* Macro keypad integration — planned but separate; v1 will expose a
-  local IPC socket (Unix domain socket) that the keypad daemon can
-  send HID events into.
+* Macro keypad integration — the daemon itself is separate (planned
+  to ride a local Unix domain socket). Phase 8's `cfg.shortcuts`
+  schema is the shared source of truth between the dialog and a
+  future keypad daemon.
 
 ## 10. Empirical verifications
 

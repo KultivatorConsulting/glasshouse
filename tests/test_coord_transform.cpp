@@ -51,6 +51,12 @@ private slots:
     void windowOffsetDoesNotAffectResult();
     void rightEdgeVerticalCenter();
     void leftEdgeVerticalCenter();
+
+    void letterboxMatchedAspectFillsWidget();
+    void letterboxTallerWidgetGetsHorizontalBars();
+    void letterboxWiderWidgetGetsVerticalBars();
+    void letterboxFallsBackToWidgetWhenVideoSizeUnknown();
+    void letterboxIsCenteredInsideWidget();
 };
 
 void TestCoordTransform::centerOfCombinedDesktop() {
@@ -145,6 +151,55 @@ void TestCoordTransform::windowOffsetDoesNotAffectResult() {
     });
     QCOMPARE(a.x, b.x);
     QCOMPARE(a.y, b.y);
+}
+
+// ----------------------------------------------------------------------
+// computeLetterbox: Phase 5 — figure out the rendered video rect inside
+// a Qt::KeepAspectRatio widget so we can use it (instead of the whole
+// widget) as the CoordTransform letterbox.
+
+void TestCoordTransform::letterboxMatchedAspectFillsWidget() {
+    // 16:9 video into a 16:9 widget — no bars.
+    const QRect r = computeLetterbox(QSize(1280, 720), QSize(1920, 1080));
+    QCOMPARE(r, QRect(0, 0, 1280, 720));
+}
+
+void TestCoordTransform::letterboxTallerWidgetGetsHorizontalBars() {
+    // 16:9 video into a 16:10 widget — bars at top and bottom.
+    // 1280/1920 = 0.6667 ; 800/1080 = 0.7407
+    // pick min → 0.6667 → rendered 1280x720, centered: y = (800-720)/2 = 40
+    const QRect r = computeLetterbox(QSize(1280, 800), QSize(1920, 1080));
+    QCOMPARE(r, QRect(0, 40, 1280, 720));
+}
+
+void TestCoordTransform::letterboxWiderWidgetGetsVerticalBars() {
+    // 16:9 video into a wider-than-16:9 widget — pillarbox left/right.
+    // 1600/1920 = 0.8333 ; 720/1080 = 0.6667
+    // pick min → 0.6667 → rendered 1280x720, x = (1600-1280)/2 = 160
+    const QRect r = computeLetterbox(QSize(1600, 720), QSize(1920, 1080));
+    QCOMPARE(r, QRect(160, 0, 1280, 720));
+}
+
+void TestCoordTransform::letterboxFallsBackToWidgetWhenVideoSizeUnknown() {
+    // Pre-first-frame: videoSize is invalid. We want the cursor math to
+    // keep working — fall back to using the whole widget as the letterbox.
+    QCOMPARE(computeLetterbox(QSize(1280, 720), QSize()),
+             QRect(0, 0, 1280, 720));
+    QCOMPARE(computeLetterbox(QSize(1280, 720), QSize(0, 1080)),
+             QRect(0, 0, 1280, 720));
+}
+
+void TestCoordTransform::letterboxIsCenteredInsideWidget() {
+    // Sanity check: letterbox rect is symmetric inside the widget.
+    const QRect r = computeLetterbox(QSize(1000, 800), QSize(1920, 1080));
+    const int leftPad  = r.x();
+    const int rightPad = 1000 - r.x() - r.width();
+    const int topPad   = r.y();
+    const int botPad   = 800 - r.y() - r.height();
+    // Off-by-one tolerance for integer rounding when the unused
+    // dimension's pad is odd.
+    QVERIFY(qAbs(leftPad - rightPad) <= 1);
+    QVERIFY(qAbs(topPad  - botPad)   <= 1);
 }
 
 QTEST_APPLESS_MAIN(TestCoordTransform)

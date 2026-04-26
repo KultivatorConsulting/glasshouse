@@ -21,6 +21,23 @@ int toApi(double pxFraction) {
 
 }  // namespace
 
+QRect computeLetterbox(const QSize& widgetSize, const QSize& videoSize) {
+    if (widgetSize.isEmpty() || videoSize.isEmpty()
+            || videoSize.width() <= 0 || videoSize.height() <= 0) {
+        return QRect(QPoint(0, 0), widgetSize);
+    }
+    const double sx = double(widgetSize.width())  / double(videoSize.width());
+    const double sy = double(widgetSize.height()) / double(videoSize.height());
+    const double s  = std::min(sx, sy);
+    const int rw = static_cast<int>(std::round(videoSize.width()  * s));
+    const int rh = static_cast<int>(std::round(videoSize.height() * s));
+    // Centered inside the widget — Qt::KeepAspectRatio centers by default
+    // and QVideoWidget follows that convention.
+    const int rx = (widgetSize.width()  - rw) / 2;
+    const int ry = (widgetSize.height() - rh) / 2;
+    return QRect(rx, ry, rw, rh);
+}
+
 ApiCoord transformToApi(const CoordTransformInput& in) {
     // 1. cursor relative to window origin
     const int wx = in.localCursor.x() - in.windowRect.x();

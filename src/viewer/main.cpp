@@ -9,6 +9,7 @@
 #include "mjpegpipeline.h"
 #include "pikvmclient.h"
 #include "secrets.h"
+#include "specialkeysdialog.h"
 #include "videopipeline.h"
 #include "videowindow.h"
 
@@ -134,6 +135,10 @@ int main(int argc, char** argv) {
     if (fullscreenHotkey.isEmpty()) {
         fullscreenHotkey = QStringLiteral("F11");
     }
+    QString specialKeysHotkey = cfg.special_keys_hotkey;
+    if (specialKeysHotkey.isEmpty()) {
+        specialKeysHotkey = QStringLiteral("Ctrl+Alt+K");
+    }
     const QString onlyHost = parser.value(onlyOpt);
 
     // ------------------------------------------------------------------
@@ -171,7 +176,8 @@ int main(int argc, char** argv) {
         inst.window->setConnectionStatus(QStringLiteral("%1: authenticating…")
                                              .arg(inst.host));
         inst.window->setCaptureContext(inst.monitorRect, cfg.logical_desktop,
-                                       releaseHotkey, fullscreenHotkey);
+                                       releaseHotkey, fullscreenHotkey,
+                                       specialKeysHotkey);
         if (w.geometry.width() > 0 && w.geometry.height() > 0) {
             inst.window->setGeometry(w.geometry);
         }
@@ -214,6 +220,18 @@ int main(int argc, char** argv) {
         return 2;
     }
     auto* router = new InputRouter(master->pk, &app);
+
+    // One special-keys palette shared across all windows. Toggle is
+    // per-window (any window's hotkey shows/hides the same dialog).
+    // Outputs route through the same InputRouter so chord and
+    // type-text traffic land on the HID master regardless of which
+    // window had focus when the user opened it.
+    auto* specialKeys = new SpecialKeysDialog(nullptr);
+    specialKeys->setCustomShortcuts(cfg.shortcuts);
+    QObject::connect(specialKeys, &SpecialKeysDialog::shortcut,
+                     router, &InputRouter::routeShortcut);
+    QObject::connect(specialKeys, &SpecialKeysDialog::typeText,
+                     router, &InputRouter::routeTypeText);
 
     // ------------------------------------------------------------------
     // Per-instance signal wiring (auth → pipeline → Janus → router).
@@ -352,6 +370,11 @@ int main(int argc, char** argv) {
                           .arg(inst.host)
                     : QStringLiteral("%1: capture OFF").arg(inst.host));
             });
+
+        // Special-keys palette: hotkey on any window toggles the same
+        // shared dialog.
+        QObject::connect(inst.window, &VideoWindow::showSpecialKeysRequested,
+                         specialKeys, &SpecialKeysDialog::toggle);
     }
 
     // Tell every window about every other window so the holder's
@@ -385,5 +408,6 @@ int main(int argc, char** argv) {
         if (inst.pk) inst.pk->stop();
         delete inst.wallClock;
     }
+    delete specialKeys;
     return rc;
 }

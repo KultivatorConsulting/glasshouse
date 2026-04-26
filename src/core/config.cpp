@@ -172,9 +172,29 @@ ConfigResult loadConfig(const QString& path) {
         }
     }
 
-    // release_hotkey
-    cfg.release_hotkey    = yamlString(root, "release_hotkey");
-    cfg.fullscreen_hotkey = yamlString(root, "fullscreen_hotkey");
+    // hotkeys
+    cfg.release_hotkey      = yamlString(root, "release_hotkey");
+    cfg.fullscreen_hotkey   = yamlString(root, "fullscreen_hotkey");
+    cfg.special_keys_hotkey = yamlString(root, "special_keys_hotkey");
+
+    // shortcuts list — optional. Each entry: {label: "...", keys: [...]}.
+    if (const auto sc = root["shortcuts"]; sc && sc.IsSequence()) {
+        for (const auto& n : sc) {
+            ShortcutSpec s;
+            s.label = QString::fromStdString(yamlScalarOr<std::string>(n, "label", ""));
+            if (const auto k = n["keys"]; k && k.IsSequence()) {
+                for (const auto& kn : k) {
+                    s.keys.append(QString::fromStdString(kn.as<std::string>()));
+                }
+            }
+            if (s.label.isEmpty() || s.keys.isEmpty()) {
+                result.errors.append(QStringLiteral(
+                    "shortcuts[] entry must have non-empty label and non-empty keys"));
+                continue;
+            }
+            cfg.shortcuts.append(s);
+        }
+    }
 
     // video
     if (const auto v = root["video"]; v) {

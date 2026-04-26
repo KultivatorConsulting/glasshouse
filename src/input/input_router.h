@@ -32,6 +32,11 @@ public slots:
     void routeMouseWheel(int delta_x, int delta_y);
     void routeKey(const QString& wireName, bool pressed);
 
+    // Used by the special-keys palette: a chord (press-in-order,
+    // release-in-reverse) and server-side type-text-as-keystrokes.
+    void routeShortcut(const QStringList& keys);
+    void routeTypeText(const QString& text, bool slow, int delayMs);
+
 private:
     QPointer<PiKvmClient> m_master;
 };

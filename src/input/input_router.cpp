@@ -28,4 +28,14 @@ void InputRouter::routeKey(const QString& wireName, bool pressed) {
     m_master->sendKey(wireName, pressed, /*finish=*/false);
 }
 
+void InputRouter::routeShortcut(const QStringList& keys) {
+    if (!m_master) return;
+    m_master->sendShortcut(keys);
+}
+
+void InputRouter::routeTypeText(const QString& text, bool slow, int delayMs) {
+    if (!m_master) return;
+    m_master->pasteText(text, slow, delayMs);
+}
+
 }  // namespace glasshouse

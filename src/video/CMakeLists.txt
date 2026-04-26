@@ -3,6 +3,7 @@ qt_add_library(glasshouse_video STATIC
     mjpegpipeline.h     mjpegpipeline.cpp
     videowindow.h       videowindow.cpp
     janusclient.h       janusclient.cpp
+    specialkeysdialog.h specialkeysdialog.cpp
 )
 
 target_link_libraries(glasshouse_video

@@ -41,6 +41,14 @@ struct VideoSpec {
     int  target_fps = 60;
 };
 
+// Custom chord entry for the special-keys palette / future macro-pad
+// daemon. `keys` is a list of MDN KeyboardEvent.code names (the same
+// `web_name` strings PiKVM's send_shortcut endpoint expects).
+struct ShortcutSpec {
+    QString     label;   // shown on the dialog button
+    QStringList keys;    // e.g. ["ControlLeft", "AltLeft", "Delete"]
+};
+
 struct Config {
     QSize                  logical_desktop;
     QList<MonitorRect>     monitors;
@@ -48,6 +56,8 @@ struct Config {
     QMap<QString, AuthSpec> auth;           // keyed by MonitorRect::pikvm
     QString                release_hotkey;
     QString                fullscreen_hotkey;
+    QString                special_keys_hotkey;
+    QList<ShortcutSpec>    shortcuts;       // optional, populates the palette
     VideoSpec              video;
     QList<WindowSpec>      windows;
 };

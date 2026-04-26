@@ -32,4 +32,15 @@ struct ApiCoord {
 
 ApiCoord transformToApi(const CoordTransformInput& in);
 
+// Given a video sink widget of `widgetSize` rendering a frame of
+// `videoSize` with `Qt::KeepAspectRatio`, return the rect *inside*
+// the widget where the video actually paints — i.e. the widget area
+// minus letterbox / pillarbox bars. Coordinates are widget-local
+// (origin at the widget's top-left).
+//
+// Returns `QRect(QPoint(0, 0), widgetSize)` when `videoSize` is
+// empty or zero, so callers can use the result before the first
+// frame has arrived.
+QRect computeLetterbox(const QSize& widgetSize, const QSize& videoSize);
+
 }  // namespace glasshouse

@@ -62,6 +62,15 @@ public:
     // order, then releasing them in reverse. Matches what the PiKVM web UI does.
     void sendShortcut(const QStringList& keys);
 
+    // Server-side type-text-as-keystrokes via `POST /api/hid/print`.
+    // The endpoint takes a UTF-8 body and types it on the target's HID,
+    // applying its configured server-side keymap (default `en_US`).
+    // `slow=true` adds an inter-key delay (`delayMs`, 0–5000) for picky
+    // BIOS prompts. Server caps the body at ~1024 chars by default; we
+    // chunk above that. Auth re-uses the cookie jar from the login
+    // session, so this only works after authenticated() has fired.
+    void pasteText(const QString& text, bool slow = false, int delayMs = 0);
+
 signals:
     void authenticated();
     void connected();

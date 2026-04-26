@@ -361,4 +361,56 @@ void PiKvmClient::sendShortcut(const QStringList& keys) {
     for (auto it = keys.rbegin(); it != keys.rend(); ++it) sendKey(*it, false);
 }
 
+void PiKvmClient::pasteText(const QString& text, bool slow, int delayMs) {
+    if (text.isEmpty()) return;
+
+    // The server accepts up to `limit` chars per request (default 1024).
+    // For longer pastes we split — each chunk is its own POST so the
+    // server can keep its rate-limiter happy.
+    constexpr qsizetype kChunk = 1024;
+    const QByteArray utf8 = text.toUtf8();
+    qsizetype offset = 0;
+    while (offset < utf8.size()) {
+        // Safe split: don't bisect a multi-byte UTF-8 sequence.
+        qsizetype take = std::min(kChunk, utf8.size() - offset);
+        while (take > 1 && offset + take < utf8.size()
+                && (static_cast<unsigned char>(utf8[offset + take]) & 0xC0) == 0x80) {
+            // continuation byte; back off until we hit a leading byte
+            --take;
+        }
+
+        QUrl url(QStringLiteral("https://%1/api/hid/print").arg(m_opts.host));
+        QUrlQuery q;
+        if (slow) q.addQueryItem(QStringLiteral("slow"), QStringLiteral("1"));
+        if (delayMs > 0) {
+            q.addQueryItem(QStringLiteral("delay"),
+                           QString::number(delayMs / 1000.0, 'f', 3));
+        }
+        // Server cap is 1024 by default; we chunk client-side already,
+        // but pass `limit` explicitly so the server returns a clear
+        // error if a future build lowers that default.
+        q.addQueryItem(QStringLiteral("limit"), QString::number(kChunk));
+        url.setQuery(q);
+
+        QNetworkRequest req(url);
+        req.setHeader(QNetworkRequest::ContentTypeHeader,
+                      QStringLiteral("text/plain; charset=utf-8"));
+
+        QNetworkReply* reply = m_nam->post(req, utf8.mid(offset, take));
+        if (m_opts.insecure_tls) {
+            connect(reply, &QNetworkReply::sslErrors,
+                    reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+        }
+        connect(reply, &QNetworkReply::finished, reply, [reply, this]() {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) {
+                qCWarning(lcHid) << m_opts.host << "pasteText failed:"
+                                 << reply->errorString();
+            }
+        });
+
+        offset += take;
+    }
+}
+
 }  // namespace glasshouse

@@ -39,14 +39,16 @@ public:
     // Pipeline pushes frames into this sink.
     QVideoSink* videoSink() const;
 
-    // Configure the target-coord math and the release hotkey. Must be
-    // called before the user can meaningfully capture. Hotkey strings are
-    // QKeySequence-parseable, e.g. "Ctrl+Alt+Shift+Escape" / "F11".
-    // `fullscreenHotkey` may be empty to disable the toggle.
+    // Configure the target-coord math and the configurable hotkeys.
+    // Must be called before the user can meaningfully capture. Hotkey
+    // strings are QKeySequence-parseable, e.g. "Ctrl+Alt+Shift+Escape" /
+    // "F11" / "Ctrl+Alt+K". Any of the hotkey strings may be empty to
+    // disable that toggle.
     void setCaptureContext(const QRect& targetMonitor,
                            const QSize& logicalDesktop,
                            const QString& releaseHotkey,
-                           const QString& fullscreenHotkey);
+                           const QString& fullscreenHotkey,
+                           const QString& specialKeysHotkey);
 
     // Tell this window about every other window in the session, so that
     // when capture is held here, mouse events whose cursor is over a
@@ -83,6 +85,9 @@ signals:
     // `wireName` is the MDN KeyboardEvent.code string (e.g. "KeyA",
     // "ShiftLeft"). Empty names are filtered out before the signal.
     void keyEvent(const QString& wireName, bool pressed);
+    // Fires when the user hits the special-keys hotkey. main.cpp wires
+    // this to the shared SpecialKeysDialog::toggle() slot.
+    void showSpecialKeysRequested();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -118,8 +123,9 @@ private:
     QRect         m_targetMonitor;
     QSize         m_logicalDesktop;
     // Single-chord hotkeys, encoded as (Qt::Key | modifiers). 0 = unset.
-    int           m_releaseHotkey    = 0;
-    int           m_fullscreenHotkey = 0;
+    int           m_releaseHotkey      = 0;
+    int           m_fullscreenHotkey   = 0;
+    int           m_specialKeysHotkey  = 0;
 
     bool          m_captured         = false;
 
