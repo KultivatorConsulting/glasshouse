@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Compile-time version string for the About box and any other UI surface
+# that wants to report what's running. The project() VERSION above is
+# the source of truth.
+add_compile_definitions(GLASSHOUSE_VERSION="${PROJECT_VERSION}")
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

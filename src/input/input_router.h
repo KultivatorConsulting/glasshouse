@@ -37,6 +37,11 @@ public slots:
     void routeShortcut(const QStringList& keys);
     void routeTypeText(const QString& text, bool slow, int delayMs);
 
+    // Target-side ATX actions: power / power_long / reset. Always sent
+    // to the HID master (which is also the PiKVM whose ATX wiring we
+    // assume is connected — typically the same box for the same target).
+    void routeAtxClick(const QString& button);
+
 private:
     QPointer<PiKvmClient> m_master;
 };

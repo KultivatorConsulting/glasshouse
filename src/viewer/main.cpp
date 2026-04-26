@@ -101,6 +101,8 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("glasshouse-viewer"));
     QCoreApplication::setOrganizationName(QStringLiteral("glasshouse"));
+    QCoreApplication::setApplicationVersion(
+        QStringLiteral(GLASSHOUSE_VERSION));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral(
@@ -414,6 +416,12 @@ int main(int argc, char** argv) {
         // shared dialog.
         QObject::connect(inst.window, &VideoWindow::showSpecialKeysRequested,
                          specialKeys, &SpecialKeysDialog::toggle);
+
+        // Target menu's ATX actions route through the same HID-master
+        // PiKvmClient as everything else. The user has confirmed in the
+        // VideoWindow's QMessageBox before this fires.
+        QObject::connect(inst.window, &VideoWindow::atxClickRequested,
+                         router, &InputRouter::routeAtxClick);
     }
 
     // Tell every window about every other window so the holder's

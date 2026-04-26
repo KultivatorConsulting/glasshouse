@@ -92,6 +92,10 @@ signals:
     // Fires when the user hits the special-keys hotkey. main.cpp wires
     // this to the shared SpecialKeysDialog::toggle() slot.
     void showSpecialKeysRequested();
+    // Emitted from the Target menu after the user confirms in a
+    // QMessageBox. main.cpp routes through InputRouter to the HID master.
+    // `button` ∈ {power, power_long, reset}.
+    void atxClickRequested(const QString& button);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -106,6 +110,7 @@ protected:
 private:
     void startCapture();
     void flushMousePending();
+    void buildMenuBar();
 
     // Pick the right CoordTransform for a cursor at globalPos: if the
     // cursor is currently over one of our sibling windows, use *that*

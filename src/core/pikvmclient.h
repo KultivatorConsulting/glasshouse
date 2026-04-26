@@ -71,6 +71,12 @@ public:
     // session, so this only works after authenticated() has fired.
     void pasteText(const QString& text, bool slow = false, int delayMs = 0);
 
+    // ATX power affordances: `POST /api/atx/click_button?button=<X>`
+    // where X is one of "power" (short press), "power_long" (force-off
+    // long press), or "reset" (hardware reset). Fire-and-forget; the
+    // server has its own debouncing. Auth uses the existing cookie jar.
+    void atxClick(const QString& button);
+
 signals:
     void authenticated();
     void connected();

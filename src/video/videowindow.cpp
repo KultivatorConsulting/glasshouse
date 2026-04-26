@@ -3,12 +3,15 @@
 #include "keymap.h"
 #include "logging.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCursor>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QSettings>
 #include <QShortcut>
@@ -80,6 +83,71 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_mouseFlushTimer, &QTimer::timeout, this,
             &VideoWindow::flushMousePending);
     m_mouseFlushTimer->start();
+
+    buildMenuBar();
+}
+
+void VideoWindow::buildMenuBar() {
+    // ---- File ----
+    auto* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
+    auto* quitAct = fileMenu->addAction(QStringLiteral("&Quit"));
+    quitAct->setShortcut(QKeySequence::Quit);  // Ctrl+Q on Linux
+    connect(quitAct, &QAction::triggered, qApp, &QCoreApplication::quit);
+
+    // ---- View ----
+    auto* viewMenu = menuBar()->addMenu(QStringLiteral("&View"));
+    auto* fsAct = viewMenu->addAction(QStringLiteral("Toggle &Fullscreen"));
+    // Shortcut text on the menu item is informational — actual toggling
+    // also happens via the QShortcut / eventFilter set up in
+    // setCaptureContext, so users can hit F11 from any focus state.
+    fsAct->setShortcut(QKeySequence(QStringLiteral("F11")));
+    connect(fsAct, &QAction::triggered, this, &VideoWindow::toggleFullscreen);
+    auto* skAct = viewMenu->addAction(QStringLiteral("Show Special &Keys…"));
+    skAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+K")));
+    connect(skAct, &QAction::triggered,
+            this, &VideoWindow::showSpecialKeysRequested);
+
+    // ---- Target (ATX) ----
+    // Each is gated by a confirmation dialog so a stray menu click
+    // doesn't reboot a production target.
+    auto* targetMenu = menuBar()->addMenu(QStringLiteral("&Target"));
+    auto confirmAndEmit = [this](const QString& question, const QString& btn) {
+        if (QMessageBox::question(
+                this, QStringLiteral("Confirm"), question,
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No) == QMessageBox::Yes) {
+            emit atxClickRequested(btn);
+        }
+    };
+    auto* powerAct = targetMenu->addAction(QStringLiteral("&Power (short press)"));
+    connect(powerAct, &QAction::triggered, this, [confirmAndEmit]() {
+        confirmAndEmit(QStringLiteral("Send a short power-button press to the target?"),
+                       QStringLiteral("power"));
+    });
+    auto* powerLongAct = targetMenu->addAction(
+        QStringLiteral("Power (&long press — force off)"));
+    connect(powerLongAct, &QAction::triggered, this, [confirmAndEmit]() {
+        confirmAndEmit(QStringLiteral("Force the target off (long power-button press)?"),
+                       QStringLiteral("power_long"));
+    });
+    auto* resetAct = targetMenu->addAction(QStringLiteral("&Reset"));
+    connect(resetAct, &QAction::triggered, this, [confirmAndEmit]() {
+        confirmAndEmit(QStringLiteral("Hardware-reset the target?"),
+                       QStringLiteral("reset"));
+    });
+
+    // ---- Help ----
+    auto* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    auto* aboutAct = helpMenu->addAction(QStringLiteral("&About Glasshouse Viewer"));
+    connect(aboutAct, &QAction::triggered, this, [this]() {
+        QMessageBox::about(this, QStringLiteral("About Glasshouse Viewer"),
+            QStringLiteral(
+                "<b>Glasshouse Viewer</b> %1<br><br>"
+                "Native Linux PiKVM client.<br><br>"
+                "<a href=\"https://github.com/kultivator-consulting/glasshouse\">"
+                "github.com/kultivator-consulting/glasshouse</a>")
+                .arg(QApplication::applicationVersion()));
+    });
 }
 
 VideoWindow::~VideoWindow() = default;
@@ -129,8 +197,10 @@ void VideoWindow::toggleFullscreen() {
     if (isFullScreen()) {
         showNormal();
         statusBar()->show();
+        menuBar()->show();
     } else {
         statusBar()->hide();
+        menuBar()->hide();
         showFullScreen();
     }
 }

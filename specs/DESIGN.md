@@ -442,9 +442,18 @@ explicit YAML `windows[].geometry` (override) > saved QSettings slot
 (last-known) > Qt default. The QSettings file lives at
 `~/.config/glasshouse/glasshouse-viewer.conf`.
 
+**Menubar + Target ATX actions — done.** Each `VideoWindow` now hosts a
+`QMenuBar` with File (Quit), View (Toggle Fullscreen, Show Special Keys),
+Target (Power short press, Power long press / force off, Reset — each
+gated by a `QMessageBox` confirmation), and Help (About). Target
+actions emit `atxClickRequested(button)` which `main.cpp` routes
+through `InputRouter` to the HID-master `PiKvmClient::atxClick`
+(`POST /api/atx/click_button?button=…`). The menubar hides alongside
+the status bar in fullscreen.
+
 Still TBD: in-process logging tweaks (file handler / rotation),
-systemd user-service unit for autostart, menu items for kvmd ATX
-reset / MSD upload / reboot-target affordances.
+systemd user-service unit for autostart, MSD upload menu item,
+bundling Qt 6.7 with the .deb (currently a separate prerequisite).
 
 ### Phase 8 — Special-keys palette + clipboard paste (1 day)
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)

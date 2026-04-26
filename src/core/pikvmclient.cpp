@@ -361,6 +361,36 @@ void PiKvmClient::sendShortcut(const QStringList& keys) {
     for (auto it = keys.rbegin(); it != keys.rend(); ++it) sendKey(*it, false);
 }
 
+void PiKvmClient::atxClick(const QString& button) {
+    if (m_authCookie.isEmpty()) {
+        qCWarning(lcPikvm) << m_opts.host
+                           << "atxClick before authenticated — dropped";
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://%1/api/atx/click_button").arg(m_opts.host));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("button"), button);
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    QNetworkReply* reply = m_nam->post(req, QByteArray());
+    if (m_opts.insecure_tls) {
+        connect(reply, &QNetworkReply::sslErrors,
+                reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+    }
+    const QString btn = button;
+    connect(reply, &QNetworkReply::finished, reply, [reply, this, btn]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qCWarning(lcPikvm) << m_opts.host << "atx click_button=" << btn
+                               << "failed:" << reply->errorString();
+        } else {
+            qCInfo(lcPikvm) << m_opts.host << "atx click_button=" << btn << "OK";
+        }
+    });
+}
+
 void PiKvmClient::pasteText(const QString& text, bool slow, int delayMs) {
     if (text.isEmpty()) return;
 

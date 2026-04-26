@@ -38,4 +38,9 @@ void InputRouter::routeTypeText(const QString& text, bool slow, int delayMs) {
     m_master->pasteText(text, slow, delayMs);
 }
 
+void InputRouter::routeAtxClick(const QString& button) {
+    if (!m_master) return;
+    m_master->atxClick(button);
+}
+
 }  // namespace glasshouse
