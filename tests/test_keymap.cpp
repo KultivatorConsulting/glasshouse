@@ -35,6 +35,7 @@ private slots:
     void commonSpecials();
     void unknownKeyReturnsEmpty();
     void enterVsNumpadEnterDistinct();
+    void shiftedSymbolsMapToPhysicalCode();
 };
 
 void TestKeyMap::lettersAreContiguous() {
@@ -93,6 +94,27 @@ void TestKeyMap::enterVsNumpadEnterDistinct() {
     // (Key_Enter); PiKVM's wire names follow the same split.
     QCOMPARE(keyEventToWire(mkKey(Qt::Key_Return)), QStringLiteral("Enter"));
     QCOMPARE(keyEventToWire(mkKey(Qt::Key_Enter)),  QStringLiteral("NumpadEnter"));
+}
+
+void TestKeyMap::shiftedSymbolsMapToPhysicalCode() {
+    // When Shift is held, Qt resolves the produced character into a
+    // different Qt::Key than the physical key (Shift+2 → Qt::Key_At, not
+    // Qt::Key_2). The wire output is the MDN code of the *physical* key,
+    // so the target's keymap can apply Shift via the separate modifier
+    // event — the same way Chrome / the kvmd web UI works.
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Exclam)),      QStringLiteral("Digit1"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_At)),          QStringLiteral("Digit2"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Percent)),     QStringLiteral("Digit5"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Ampersand)),   QStringLiteral("Digit7"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_ParenRight)),  QStringLiteral("Digit0"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Underscore)),  QStringLiteral("Minus"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Plus)),        QStringLiteral("Equal"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_BraceLeft)),   QStringLiteral("BracketLeft"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Bar)),         QStringLiteral("Backslash"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Colon)),       QStringLiteral("Semicolon"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_QuoteDbl)),    QStringLiteral("Quote"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_Question)),    QStringLiteral("Slash"));
+    QCOMPARE(keyEventToWire(mkKey(Qt::Key_AsciiTilde)),  QStringLiteral("Backquote"));
 }
 
 void TestKeyMap::unknownKeyReturnsEmpty() {

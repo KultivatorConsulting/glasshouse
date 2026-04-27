@@ -120,6 +120,36 @@ QString keyEventToWire(const QKeyEvent& ev) {
         case Qt::Key_Period:       return QStringLiteral("Period");
         case Qt::Key_Slash:        return QStringLiteral("Slash");
         case Qt::Key_QuoteLeft:    return QStringLiteral("Backquote");
+
+        // Shifted-symbol forms (US layout). When Shift is held, Qt
+        // resolves the produced character into a different Qt::Key
+        // enum than the unshifted physical key — Shift+2 reports
+        // Qt::Key_At rather than Qt::Key_2. We send the *physical*
+        // MDN code (Digit2) and let the target's keymap apply Shift
+        // via the modifier signal, so map every shifted-symbol form
+        // back to the same code as its unshifted sibling above.
+        // Layout assumption matches DESIGN.md (Kubuntu en-us).
+        case Qt::Key_Exclam:       return QStringLiteral("Digit1");
+        case Qt::Key_At:           return QStringLiteral("Digit2");
+        case Qt::Key_NumberSign:   return QStringLiteral("Digit3");
+        case Qt::Key_Dollar:       return QStringLiteral("Digit4");
+        case Qt::Key_Percent:      return QStringLiteral("Digit5");
+        case Qt::Key_AsciiCircum:  return QStringLiteral("Digit6");
+        case Qt::Key_Ampersand:    return QStringLiteral("Digit7");
+        case Qt::Key_Asterisk:     return QStringLiteral("Digit8");
+        case Qt::Key_ParenLeft:    return QStringLiteral("Digit9");
+        case Qt::Key_ParenRight:   return QStringLiteral("Digit0");
+        case Qt::Key_Underscore:   return QStringLiteral("Minus");
+        case Qt::Key_Plus:         return QStringLiteral("Equal");
+        case Qt::Key_BraceLeft:    return QStringLiteral("BracketLeft");
+        case Qt::Key_BraceRight:   return QStringLiteral("BracketRight");
+        case Qt::Key_Bar:          return QStringLiteral("Backslash");
+        case Qt::Key_Colon:        return QStringLiteral("Semicolon");
+        case Qt::Key_QuoteDbl:     return QStringLiteral("Quote");
+        case Qt::Key_Less:         return QStringLiteral("Comma");
+        case Qt::Key_Greater:      return QStringLiteral("Period");
+        case Qt::Key_Question:     return QStringLiteral("Slash");
+        case Qt::Key_AsciiTilde:   return QStringLiteral("Backquote");
     }
 
     return {};
