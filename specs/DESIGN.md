@@ -1,6 +1,8 @@
 # Multi-Screen PiKVM Desktop Client — Design
 
-**Status:** pre-implementation design, coordinate model empirically verified
+**Status:** v0.1.0 shipped — Phases 0–8 complete. Document is now a
+running architectural reference; future work updates it in place
+rather than as a phase plan.
 **Target platform:** Kubuntu 24.04+ (KDE Plasma 6.x, Wayland)
 **Target laptop OS:** Ubuntu / Linux
 
@@ -368,23 +370,23 @@ The application rejects a config with:
 Verified coordinate range and mapping via `pikvm_coord_verify.py`.
 Results recorded in §10.
 
-### Phase 1 — PiKVM client skeleton (1–2 days)
+### Phase 1 — PiKVM client skeleton — done
 One `PiKvmClient` QThread class. HTTPS auth, state WebSocket, basic
 request/response for HID events. No video yet. Validates auth,
 session cookie flow, 2FA concatenation, WebSocket keepalive.
 
-### Phase 2 — GStreamer video pipeline (1 day)
+### Phase 2 — GStreamer video pipeline — done
 H.264 over WebSocket into `appsrc`, through
 `h264parse ! vah264dec ! videoconvert ! qtvideosink`, rendered into
 a `QVideoWidget`. Measure end-to-end latency (target displays a
 clock, compare frame to wall clock).
 
-### Phase 3 — Single-window capture & input (1 day)
+### Phase 3 — Single-window capture & input — done
 One window, click-to-capture, release hotkey, mouse + keyboard routing
 via the coord transform. Prove the full end-to-end loop with the HID
 master.
 
-### Phase 4 — N windows + config (1 day)
+### Phase 4 — N windows + config — done
 Load YAML config, spawn N windows, InputRouter routes through the
 HID-master client. Validate with N=2, then test N=3 expansion as a
 pure config change (no code changes).
@@ -432,7 +434,7 @@ Graceful degradation: status-bar messages already cover "reconnecting…"
 without an in-video overlay; left as-is until field testing surfaces a
 specific gap.
 
-### Phase 7 — Polish (in progress)
+### Phase 7 — Polish — done
 
 **Window-position persistence — done.** `VideoWindow::closeEvent`
 saves `saveGeometry()` (position, size, maximized / fullscreen flag —
@@ -491,11 +493,7 @@ is an interactive multi-window viewer, not a daemon. KDE's
 for users who actually want autostart. Re-evaluate if a "headless
 always-on" deployment use case ever materialises.
 
-Phase 7 is substantially complete. The remaining todo (a code-review
-cleanup-on-exit audit) is low-value polish and not on the critical
-path.
-
-### Phase 8 — Special-keys palette + clipboard paste (1 day)
+### Phase 8 — Special-keys palette + clipboard paste — done
 A floating, stays-on-top "Special Keys" dialog (`SpecialKeysDialog`)
 that solves the cases where the local compositor swallows a keypress
 before our captured window sees it (KDE Spectacle on Print Screen,
