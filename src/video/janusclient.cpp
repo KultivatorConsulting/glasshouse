@@ -23,6 +23,12 @@ constexpr int kMaxBackoffMs      = 30'000;
 // sessionFailed. With the backoff schedule above, that's ~1+2+4+8 = 15 s
 // worst-case before main.cpp gets to re-authenticate and rebuild.
 constexpr int kMaxAttempts       = 4;
+// Retry budget for the plugin-error-on-watch path (older PiKVM firmware
+// returns 503 until ustreamer produces SPS/PPS). 2 s between retries
+// matches stream_janus.js. 5 retries ≈ 10 s of warm-up tolerance before
+// we give up and let the outer reconnect logic try a fresh session.
+constexpr int kWatchRetryDelayMs = 2'000;
+constexpr int kMaxWatchRetries   = 5;
 }  // namespace
 
 JanusClient::JanusClient(Options opts, QObject* parent)
@@ -36,6 +42,12 @@ JanusClient::JanusClient(Options opts, QObject* parent)
     m_reconnectTimer->setSingleShot(true);
     connect(m_reconnectTimer.get(), &QTimer::timeout,
             this, &JanusClient::attemptReconnect);
+
+    m_watchRetryTimer = std::make_unique<QTimer>(this);
+    m_watchRetryTimer->setSingleShot(true);
+    m_watchRetryTimer->setInterval(kWatchRetryDelayMs);
+    connect(m_watchRetryTimer.get(), &QTimer::timeout,
+            this, &JanusClient::sendWatch);
 }
 
 JanusClient::~JanusClient() = default;
@@ -52,6 +64,7 @@ void JanusClient::close() {
     m_stopRequested = true;
     m_keepalive->stop();
     m_reconnectTimer->stop();
+    m_watchRetryTimer->stop();
     if (m_ws) m_ws->close();
 }
 
@@ -88,6 +101,8 @@ void JanusClient::resetPerAttemptState() {
     m_handleId  = 0;
     m_txnTag.clear();
     m_nextTxn   = 1;
+    m_watchRetries = 0;
+    if (m_watchRetryTimer) m_watchRetryTimer->stop();
 }
 
 void JanusClient::onWsConnected() {
@@ -208,6 +223,18 @@ void JanusClient::sendWatch() {
     sendJanus(req);
 }
 
+void JanusClient::sendStop() {
+    QJsonObject body;
+    body.insert(QStringLiteral("request"), QStringLiteral("stop"));
+    QJsonObject req;
+    req.insert(QStringLiteral("janus"),       QStringLiteral("message"));
+    req.insert(QStringLiteral("body"),        body);
+    req.insert(QStringLiteral("session_id"),  m_sessionId);
+    req.insert(QStringLiteral("handle_id"),   m_handleId);
+    req.insert(QStringLiteral("transaction"), nextTxn(QStringLiteral("stop")));
+    sendJanus(req);
+}
+
 void JanusClient::sendAnswer(const QString& sdp) {
     if (m_sessionId == 0 || m_handleId == 0) {
         qCWarning(lcJanus) << m_opts.host
@@ -273,6 +300,35 @@ void JanusClient::handleEvent(const QJsonObject& obj) {
                                 .toJson(QJsonDocument::Compact);
     }
 
+    // Plugin error path: ustreamer's pre-IDR 503 ("Haven't received
+    // SPS/PPS from memsink yet") — older firmware refuses watch until
+    // the encoder produces its first IDR. Newer firmware just goes
+    // silent. Mirror stream_janus.js: stop + watch again every 2 s
+    // until the encoder catches up, capped at kMaxWatchRetries before
+    // we escalate.
+    const auto pluginInner = plugindata.value(QStringLiteral("data")).toObject();
+    if (const int errCode = pluginInner.value(
+            QStringLiteral("error_code")).toInt(); errCode != 0) {
+        const QString errText = pluginInner.value(
+            QStringLiteral("error")).toString();
+        qCWarning(lcJanus) << m_opts.host << "plugin error" << errCode
+                           << ":" << errText;
+        if (m_watchRetries < kMaxWatchRetries) {
+            ++m_watchRetries;
+            qCInfo(lcJanus) << m_opts.host
+                            << "retrying watch in" << kWatchRetryDelayMs
+                            << "ms (attempt" << m_watchRetries
+                            << "of" << kMaxWatchRetries << ")";
+            sendStop();
+            m_watchRetryTimer->start();
+        } else {
+            transientFail(QStringLiteral(
+                "plugin error %1: %2 (retries exhausted)")
+                .arg(errCode).arg(errText));
+        }
+        return;
+    }
+
     const auto jsep = obj.value(QStringLiteral("jsep")).toObject();
     if (jsep.isEmpty()) return;
 
@@ -290,6 +346,7 @@ void JanusClient::handleEvent(const QJsonObject& obj) {
     // reset the retry budget — the next reconnect cycle starts fresh.
     m_attempt            = 0;
     m_reconnectBackoffMs = kInitialBackoffMs;
+    m_watchRetries       = 0;
     emit sdpOfferReceived(sdp);
 }
 
@@ -306,6 +363,7 @@ void JanusClient::handleError(const QJsonObject& obj, const QString& tag) {
 void JanusClient::transientFail(const QString& reason) {
     if (m_stopRequested) return;
     m_keepalive->stop();
+    m_watchRetryTimer->stop();
     if (m_ws) {
         // Disconnect signal slots so the impending close doesn't
         // recursively trigger this path again.

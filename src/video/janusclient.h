@@ -81,6 +81,7 @@ private:
     void    sendCreate();
     void    sendAttach();
     void    sendWatch();
+    void    sendStop();
 
     void    handleServerInfo(const QJsonObject& obj);
     void    handleSuccess(const QJsonObject& obj, const QString& tag);
@@ -101,6 +102,10 @@ private:
     std::unique_ptr<QWebSocket>  m_ws;
     std::unique_ptr<QTimer>      m_keepalive;
     std::unique_ptr<QTimer>      m_reconnectTimer;
+    // Retry timer for the watch handshake when ustreamer is still pre-IDR
+    // and the plugin returns 503 "Haven't received SPS/PPS from memsink
+    // yet" (older firmware). Mirrors stream_janus.js's stop+watch loop.
+    std::unique_ptr<QTimer>      m_watchRetryTimer;
 
     quint64                      m_nextTxn = 1;
     // transaction id -> logical tag ("info","create","attach","watch",
@@ -113,6 +118,7 @@ private:
     bool                         m_stopRequested = false;
     int                          m_attempt        = 0;
     int                          m_reconnectBackoffMs = 1000;
+    int                          m_watchRetries  = 0;
 };
 
 }  // namespace glasshouse
