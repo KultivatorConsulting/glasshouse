@@ -661,6 +661,28 @@ that path exclusively.
   the signalling probe: normal. The ustreamer plugin drops handles that
   never answer. The viewer path answers promptly, so the session stays
   live.
+* **SDP answer augmentation (verified 2026-04-25).** The auto-generated
+  answer that webrtcbin produces against this plugin's offer is missing
+  two pieces the plugin requires before it will start pushing media:
+  * `a=fmtp:<pt> profile-level-id=...;packetization-mode=1` — without
+    the explicit packetization-mode, the plugin won't fragment NALs
+    across RTP packets.
+  * `a=rtcp-fb:<pt> nack` and `a=rtcp-fb:<pt> goog-remb` (in addition
+    to the `nack pli` webrtcbin already adds) — empirically the plugin
+    requires the full feedback set the offer advertises before media
+    flows.
+  The failure mode is silent: Janus signals `webrtcup`, ICE/DTLS/SRTP
+  all complete, but no RTP arrives and `webrtcbin` never fires
+  `pad-added`. Browsers don't hit this because their answers carry the
+  full set out of the box. We patch the answer SDP with two regex
+  edits in `videopipeline.cpp` after `set-local-description` settles
+  but before sending it to Janus.
+* **IPv4-only ICE (verified 2026-04-27).** On a stock PiKVM 4 Plus,
+  ICE selecting an IPv6 link-local pair (`fe80::`) succeeds for STUN
+  binding + DTLS handshake — Janus emits `webrtcup` — but the
+  ustreamer plugin never delivers SRTP to the IPv6 endpoint. Forcing
+  libnice to gather only IPv4 LAN addresses via `add-local-ip-address`
+  on the `ice-agent` sidesteps the issue.
 * Sources of truth (both checked 2026-04-25, no docs.pikvm.org coverage):
   * `pikvm/ustreamer` — `janus/src/plugin.c` for the plugin's accepted
     request verbs (`watch`, `start`, `stop`).

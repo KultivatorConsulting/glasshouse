@@ -284,6 +284,7 @@ void JanusClient::handleEvent(const QJsonObject& obj) {
     }
     qCInfo(lcJanus) << m_opts.host << "SDP offer received,"
                     << sdp.size() << "bytes";
+    qCDebug(lcJanus).noquote() << m_opts.host << "offer SDP:\n" << sdp;
     // Signalling reached its happy state. From here, any drop is a
     // "stable session interrupted" rather than a startup failure, so
     // reset the retry budget — the next reconnect cycle starts fresh.
