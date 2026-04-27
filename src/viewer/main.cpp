@@ -295,6 +295,15 @@ int main(int argc, char** argv) {
 
         if (inst.transport == VideoTransport::Janus) {
             inst.webrtc = new VideoPipeline(inst.window->videoSink(), &app);
+            // Loud warning at WARN level so it shows up in default
+            // launches (no QT_LOGGING_RULES needed). The leak is well
+            // outside our pipeline boundary; see DESIGN.md §10.5.
+            qCWarning(lcVideo).nospace()
+                << inst.host << ": transport=janus has a known long-running "
+                << "memory leak inside GStreamer's webrtcbin (~8 MB/s/stream). "
+                << "Process RSS will grow unbounded; expect to restart the "
+                << "viewer periodically, or switch this entry to "
+                << "transport: mjpeg. See DESIGN.md §10.5.";
         } else {
             inst.mjpeg  = new MjpegPipeline(inst.window->videoSink(), &app);
         }

@@ -685,6 +685,38 @@ that path exclusively.
   accepts it. Glasshouse should do the same; the state-WS wake covers
   the common case but the encoder may take a beat to produce its
   first IDR after spawning.
+* **`webrtcbin` long-running leak (open 2026-04-27).** GStreamer's
+  `webrtcbin` (1.24.2) leaks at a steady **~8 MB/s/stream** as long
+  as media is flowing. With two PiKVMs at 1080p the process's RSS
+  climbed past 67 GB in ~3 hours of normal use, swap-thrashed the
+  host, and pushed load average past 200. Bisection (2026-04-27):
+  * Replacing the decode chain with `fakesink` immediately on
+    `pad-added` → leak persists at the same rate, so the decoder,
+    `videoconvert`, and our Qt-side `QVideoFrame` path are
+    exonerated.
+  * `MALLOC_ARENA_MAX=2` → no change, so it's not glibc arena
+    fragmentation.
+  * `webrtcbin` `latency=50` (down from default 200) → no change.
+  * Periodic `JanusClient + VideoPipeline` teardown+rebuild +
+    `malloc_trim(0)` in the `Impl` destructor → **no change**.
+    The bin's destructor runs and unrefs as expected, but the
+    leaked allocations are *true unfreed pointers* that survive
+    `gst_object_unref` on the bin. Process RSS is the only thing
+    that can recover them.
+  Conclusion: the leak is inside `webrtcbin` / its embedded
+  `rtpbin` / `libnice` / SRTP / DTLS subgraph and cannot be
+  mitigated at the GstElement teardown layer. Needs an upstream
+  bug report against `gst-plugins-bad`. Until then:
+  * **Recommended workaround**: switch the affected PiKVM to
+    `transport: mjpeg`. The MJPEG path uses
+    `souphttpsrc → multipartdemux → jpegdec` and never
+    instantiates `webrtcbin`, so it doesn't leak. Costs more
+    bandwidth and slightly more CPU than H.264 but is otherwise
+    equivalent for KVM use.
+  * **Process-restart mitigation** (out of scope for this client):
+    a watchdog that respawns `glasshouse-viewer` every few hours
+    is the only currently-known way to bound RSS while keeping
+    the Janus transport.
 * Sources of truth (both checked 2026-04-25, no docs.pikvm.org coverage):
   * `pikvm/ustreamer` — `janus/src/plugin.c` for the plugin's accepted
     request verbs (`watch`, `start`, `stop`).
@@ -704,6 +736,7 @@ that path exclusively.
 | HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
 | Dock disconnect re-orders target monitors | open | Calibration flow or manual reassignment in config |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
+| `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |
 
 ## 12. References
 

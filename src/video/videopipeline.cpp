@@ -18,6 +18,10 @@
 #include <atomic>
 #include <cstring>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 namespace glasshouse {
 
 namespace {
@@ -59,6 +63,14 @@ struct VideoPipeline::Impl {
             gst_object_unref(pipeline);
             pipeline = nullptr;
         }
+#ifdef __GLIBC__
+        // Force glibc to return decommitted pages to the OS. Without this,
+        // the per-arena free chunks accumulated by webrtcbin's internal
+        // allocations stay charged to the process even after the pipeline
+        // unref runs every destructor. Cheap (~ms) and only runs at
+        // pipeline teardown, which is rare.
+        malloc_trim(0);
+#endif
     }
 
     // ---------- pad-added: build the decode chain lazily -------------------

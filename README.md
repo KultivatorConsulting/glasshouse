@@ -21,9 +21,15 @@ Plus + PiKVM 3) setup.
 What works end-to-end today:
 
 - One independently-movable, resizable Qt window per configured PiKVM.
-- WebRTC over Janus (`/janus/ws`, plugin `janus.plugin.ustreamer`) with
-  hardware H.264 decode preferred (`nvh264dec` / `vah264dec`),
-  `avdec_h264` fallback. MJPEG transport for older boards.
+- **MJPEG transport** (`/streamer/stream`) — recommended for any
+  long-running session. Leak-free, works on every PiKVM model.
+- WebRTC over Janus (`/janus/ws`, plugin `janus.plugin.ustreamer`)
+  with hardware H.264 decode preferred (`nvh264dec` / `vah264dec`),
+  `avdec_h264` fallback. **Note:** the underlying `webrtcbin` element
+  has a long-running memory leak (~8 MB/s/stream); only suitable
+  for short sessions or until you can restart the viewer. See
+  [DESIGN.md §10.5](specs/DESIGN.md) for the investigation. MJPEG
+  is the path to use in production for now.
 - Session-wide click-to-capture: cursor walks continuously across
   windows, with the active coordinate transform following it.
 - Mouse, keyboard, scroll wheel, and curated/custom shortcut chords

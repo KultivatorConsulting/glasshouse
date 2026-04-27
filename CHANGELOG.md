@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Known issues
+- **`webrtcbin` long-running memory leak** (~8 MB/s/stream). The
+  GStreamer `webrtcbin` element used by `transport: janus` leaks
+  steadily while media is flowing; observed RSS reached 67 GB in
+  ~3 hours with two PiKVMs. Bisected to `webrtcbin` internals
+  (decoder, `videoconvert`, our Qt path, glibc arenas, and pipeline
+  teardown all ruled out). **Workaround**: set `transport: mjpeg`
+  for affected PiKVMs. The MJPEG path is leak-free. See
+  DESIGN.md §10.5 for the full investigation.
+
+### Changed
+- Loud `WARN`-level startup log when `transport: janus` is selected,
+  pointing at DESIGN.md §10.5 and the MJPEG workaround. Easy to
+  miss otherwise — the leak takes hours to manifest.
+
+### Fixed
+- `VideoPipeline::Impl` destructor now calls `malloc_trim(0)` on
+  glibc to return decommitted heap pages to the OS at pipeline
+  teardown. Doesn't fix the `webrtcbin` leak (those allocations
+  aren't actually freed) but trims any incidental fragmentation
+  from session churn.
+
 ## [0.1.0] - 2026-04-27
 
 First public release. A native Linux Qt 6 / C++ KVM client that
