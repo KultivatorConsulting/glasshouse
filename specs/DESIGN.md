@@ -661,28 +661,32 @@ that path exclusively.
   the signalling probe: normal. The ustreamer plugin drops handles that
   never answer. The viewer path answers promptly, so the session stays
   live.
-* **SDP answer augmentation (verified 2026-04-25).** The auto-generated
-  answer that webrtcbin produces against this plugin's offer is missing
-  two pieces the plugin requires before it will start pushing media:
-  * `a=fmtp:<pt> profile-level-id=...;packetization-mode=1` — without
-    the explicit packetization-mode, the plugin won't fragment NALs
-    across RTP packets.
-  * `a=rtcp-fb:<pt> nack` and `a=rtcp-fb:<pt> goog-remb` (in addition
-    to the `nack pli` webrtcbin already adds) — empirically the plugin
-    requires the full feedback set the offer advertises before media
-    flows.
-  The failure mode is silent: Janus signals `webrtcup`, ICE/DTLS/SRTP
-  all complete, but no RTP arrives and `webrtcbin` never fires
-  `pad-added`. Browsers don't hit this because their answers carry the
-  full set out of the box. We patch the answer SDP with two regex
-  edits in `videopipeline.cpp` after `set-local-description` settles
-  but before sending it to Janus.
-* **IPv4-only ICE (verified 2026-04-27).** On a stock PiKVM 4 Plus,
-  ICE selecting an IPv6 link-local pair (`fe80::`) succeeds for STUN
-  binding + DTLS handshake — Janus emits `webrtcup` — but the
-  ustreamer plugin never delivers SRTP to the IPv6 endpoint. Forcing
-  libnice to gather only IPv4 LAN addresses via `add-local-ip-address`
-  on the `ice-agent` sidesteps the issue.
+* **Encoder warmup via the kvmd state WS (verified 2026-04-27).** The
+  Janus plugin only emits H.264 RTP when the `ustreamer` process is
+  actually running. On a stock PiKVM with `stream_forever=false`
+  (the default), kvmd spawns `ustreamer` lazily: its stream-controller
+  spawns the encoder on the False→True edge of "at least one client
+  has the state WS open with `?stream=true`" (kvmd
+  `apps/kvmd/server.py` `_on_ws_added` → `__stream_controller`). If
+  no client is watching, attaching `janus.plugin.ustreamer` and
+  sending `watch` succeeds at the signalling layer — Janus completes
+  ICE+DTLS, emits `webrtcup` — but no SPS/PPS ever shows up at the
+  memsink, so no RTP is forwarded and `webrtcbin` never fires
+  `pad-added`. Older ustreamer surfaces this as
+  `{"error_code":503,"error":"Haven't received SPS/PPS from memsink yet"}`
+  on the watch reply (seen on PiKVM 3 / kvmd 3.106). Newer ustreamer
+  silently drops the SDP-build SPS/PPS check, so the failure mode on
+  a current PiKVM 4 Plus is "signalling completes, video stays
+  black". **Mitigation:** open the kvmd state WS at
+  `wss://<host>/api/ws?stream=1` and keep it open for the lifetime
+  of the session. That single bit is what wakes the encoder; with it
+  set, the cold-start Janus handshake just works on either firmware.
+* **Cold-start retry on 503 (older firmware).** If the watch reply
+  carries `error_code:503` (older ustreamer pre-warming), the kvmd web
+  UI re-issues `stop`+`watch` after a 2 s timer until the plugin
+  accepts it. Glasshouse should do the same; the state-WS wake covers
+  the common case but the encoder may take a beat to produce its
+  first IDR after spawning.
 * Sources of truth (both checked 2026-04-25, no docs.pikvm.org coverage):
   * `pikvm/ustreamer` — `janus/src/plugin.c` for the plugin's accepted
     request verbs (`watch`, `start`, `stop`).

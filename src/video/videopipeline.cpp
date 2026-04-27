@@ -1,11 +1,8 @@
 #include "videopipeline.h"
 #include "logging.h"
 
-#include <QHostAddress>
 #include <QMetaObject>
-#include <QNetworkInterface>
 #include <QPointer>
-#include <QRegularExpression>
 #include <QSize>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
@@ -337,37 +334,9 @@ struct VideoPipeline::Impl {
             return;
         }
         gchar* sdpText = gst_sdp_message_as_text(localDesc->sdp);
-        QString sdpStr = QString::fromUtf8(sdpText ? sdpText : "");
+        const QString sdpStr = QString::fromUtf8(sdpText ? sdpText : "");
         g_free(sdpText);
         gst_webrtc_session_description_free(localDesc);
-
-        // Augment the answer to look more like a browser's. Janus's
-        // ustreamer plugin sends H.264 with packetization-mode=1
-        // (fragmented NALs across RTP packets) and rtcp-fb negotiating
-        // nack + goog-remb; webrtcbin's auto-answer omits all of this
-        // (just `nack pli` and `profile-level-id`), and empirically the
-        // plugin stays silent on media when those bits are missing —
-        // even though `webrtcup` fires. Browser SDP answers include
-        // them, browsers see video, we don't.
-        //
-        // Surgical text edits rather than rebuilding the SDP because
-        // we want to keep webrtcbin's ICE candidates and DTLS
-        // fingerprint intact.
-        const QString origAnswer = sdpStr;
-        // 1. Add packetization-mode=1 to the fmtp line if absent.
-        sdpStr.replace(
-            QRegularExpression(QStringLiteral(
-                "a=fmtp:(\\d+) (profile-level-id=[0-9A-Fa-f]+)(?!.*packetization-mode)")),
-            QStringLiteral("a=fmtp:\\1 \\2;packetization-mode=1"));
-        // 2. After the existing rtcp-fb line, mirror the offer's full set
-        //    (nack, goog-remb) so the plugin trusts we'll honour them.
-        sdpStr.replace(
-            QRegularExpression(QStringLiteral("(a=rtcp-fb:(\\d+) nack pli\\n?)")),
-            QStringLiteral("\\1a=rtcp-fb:\\2 nack\na=rtcp-fb:\\2 goog-remb\n"));
-
-        if (sdpStr != origAnswer) {
-            qCInfo(lcVideo) << "augmented answer SDP for Janus compatibility";
-        }
 
         qCInfo(lcVideo) << "ICE gathering complete, answer ready,"
                         << sdpStr.size() << "bytes";
@@ -417,62 +386,6 @@ QString VideoPipeline::start() {
         "bundle-policy", GST_WEBRTC_BUNDLE_POLICY_MAX_BUNDLE, nullptr);
 
     gst_bin_add(GST_BIN(pipeline), webrtcbin);
-
-    // Restrict ICE candidate gathering to IPv4 LAN-shaped local
-    // addresses. Empirically (tcpdump on enp5s0f0 captured by hand
-    // 2026-04-27): on a stock PiKVM 4 Plus, ICE selecting an IPv6
-    // link-local pair (fe80::) succeeds for STUN binding + DTLS
-    // handshake, Janus emits `webrtcup`, but the ustreamer plugin
-    // never delivers SRTP to the IPv6 endpoint — webrtcbin sees zero
-    // inbound RTP, no `pad-added`, blank video. Forcing libnice to
-    // only gather IPv4 addresses sidesteps the issue: ICE picks the
-    // IPv4 host pair, media flows.
-    //
-    // `add-local-ip-address` since GStreamer 1.20: any explicit add
-    // restricts gathering to the added set (no implicit "use everything").
-    {
-        GstObject* iceAgent = nullptr;
-        g_object_get(webrtcbin, "ice-agent", &iceAgent, nullptr);
-        if (iceAgent) {
-            int addedCount = 0;
-            for (const auto& iface : QNetworkInterface::allInterfaces()) {
-                const auto flags = iface.flags();
-                if (!(flags & QNetworkInterface::IsUp))         continue;
-                if (flags & QNetworkInterface::IsLoopBack)      continue;
-                // Skip Docker / VirtualBox / KVM bridges — they can't
-                // reach a PiKVM on the physical LAN; their candidates
-                // just slow ICE down.
-                const QString name = iface.name();
-                if (name.startsWith(QLatin1String("docker"))
-                 || name.startsWith(QLatin1String("br-"))
-                 || name.startsWith(QLatin1String("vmnet"))
-                 || name.startsWith(QLatin1String("virbr"))
-                 || name.startsWith(QLatin1String("veth"))) {
-                    continue;
-                }
-                for (const auto& entry : iface.addressEntries()) {
-                    const QHostAddress addr = entry.ip();
-                    if (addr.protocol() != QAbstractSocket::IPv4Protocol) continue;
-                    const QString s = addr.toString();
-                    if (s.startsWith(QLatin1String("169.254."))) continue; // IPv4 LL
-                    const QByteArray ba = s.toUtf8();
-                    gboolean ret = FALSE;
-                    g_signal_emit_by_name(iceAgent, "add-local-ip-address",
-                                          ba.constData(), &ret);
-                    qCInfo(lcVideo) << "ICE: add local ip"
-                                    << s << "on" << name
-                                    << "ok=" << (ret ? "1" : "0");
-                    if (ret) ++addedCount;
-                }
-            }
-            if (addedCount == 0) {
-                qCWarning(lcVideo) << "ICE: no LAN IPv4 addresses added; "
-                                      "libnice will fall back to gathering "
-                                      "everything (including IPv6 link-local)";
-            }
-            gst_object_unref(iceAgent);
-        }
-    }
 
     auto impl = std::make_unique<Impl>();
     impl->pipeline  = pipeline;

@@ -14,9 +14,15 @@ class QWebSocket;
 
 namespace glasshouse {
 
-// One client per PiKVM. Owns the HTTPS auth session, the `/api/ws?stream=0`
+// One client per PiKVM. Owns the HTTPS auth session, the `/api/ws?stream=1`
 // state WebSocket, the kvmd-level ping/pong keepalive, reconnect with
 // exponential backoff, and the outgoing HID event senders.
+//
+// `stream=1` is required, not optional: kvmd's stream controller spawns
+// `ustreamer` (the H.264 encoder feeding the Janus plugin) on the False→True
+// edge of "any client is watching". Opening the WS with `stream=0` leaves
+// the encoder dormant, the Janus session connects but no RTP ever arrives,
+// and video stays blank — see DESIGN.md §10.5.
 //
 // All networking is asynchronous and driven by the Qt event loop on the thread
 // that owns this QObject. No internal threads. If Phase 4 wants one thread per

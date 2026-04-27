@@ -228,7 +228,7 @@ void PiKvmClient::openWebSocket() {
     }
 
     QNetworkRequest req(QUrl(
-        QStringLiteral("wss://%1/api/ws?stream=0").arg(m_opts.host)));
+        QStringLiteral("wss://%1/api/ws?stream=1").arg(m_opts.host)));
     req.setRawHeader(QByteArrayLiteral("Cookie"), m_authCookie.toLatin1());
 
     m_initialStateSeen = false;
