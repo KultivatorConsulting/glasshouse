@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-12
+
 ### Known issues
 - **`webrtcbin` long-running memory leak** (~8 MB/s/stream). The
   GStreamer `webrtcbin` element used by `transport: janus` leaks
@@ -23,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   miss otherwise — the leak takes hours to manifest.
 
 ### Fixed
+- Shifted-symbol keys typed on the physical keyboard (`?`, `(`, `)`,
+  `@`, `#`, `_`, `+`, `{`, `}`, `|`, `:`, `"`, `<`, `>`, `~`, `!`,
+  `$`, `%`, `^`, `&`, `*`) were silently dropped at the eventFilter:
+  Qt resolves shifted forms into different `Qt::Key` enums from the
+  unshifted physical key (Shift+2 → `Qt::Key_At` rather than
+  `Qt::Key_2`), so the keymap fell through to the unmapped return.
+  KeyMap now routes each shifted form back to its physical-key MDN
+  code (US layout); the Shift modifier event continues to fire on
+  its own, and the target's keymap composes the two into the right
+  character.
 - `VideoPipeline::Impl` destructor now calls `malloc_trim(0)` on
   glibc to return decommitted heap pages to the OS at pipeline
   teardown. Doesn't fix the `webrtcbin` leak (those allocations
@@ -125,5 +137,6 @@ PiKVM web UIs" pattern for managing remote target machines.
   shared source of truth between the Special Keys palette and a
   future keypad daemon, but the daemon itself is separate work.
 
-[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kultivator-consulting/glasshouse/releases/tag/v0.1.0
