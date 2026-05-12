@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-13
+
+### Fixed
+- High-resolution mouse wheels and Wayland touchpad scrolls were
+  silently dropped: Qt delivers `angleDelta` in sub-notch increments
+  (e.g. ±16 1/8-degrees per event) instead of one full ±120 notch,
+  and the previous integer-divide-by-120 rounded each event to zero
+  before reaching the wire. `handleWheel` now accumulates `angleDelta`
+  across events and emits `mouseWheel` only when the running total
+  crosses a full ±120 notch in either axis, retaining the sub-notch
+  residue for the next event.
+
 ## [0.1.1] - 2026-05-12
 
 ### Known issues
@@ -137,6 +149,7 @@ PiKVM web UIs" pattern for managing remote target machines.
   shared source of truth between the Special Keys palette and a
   future keypad daemon, but the daemon itself is separate work.
 
-[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kultivator-consulting/glasshouse/releases/tag/v0.1.0
