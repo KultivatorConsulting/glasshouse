@@ -406,10 +406,18 @@ void VideoWindow::flushMousePending() {
 bool VideoWindow::handleWheel(QWheelEvent* ev) {
     if (!m_captured) return false;
     // PiKVM accepts signed-int wheel deltas and clamps internally. QWheel's
-    // angleDelta is in 1/8-degrees; standard mouse notches = 120. Divide by
-    // 120 so one notch becomes ±1 on the wire.
-    const QPoint ad = ev->angleDelta() / 120;
-    if (!ad.isNull()) emit mouseWheel(ad.x(), ad.y());
+    // angleDelta is in 1/8-degrees; one notch = 120. Stepped mice deliver
+    // ±120 per notch in a single event, but high-resolution wheels and
+    // Wayland touchpad scrolls deliver many small sub-notch events
+    // (e.g. ±16 each). Accumulate so sub-notch deltas combine into
+    // whole-notch ±1 values on the wire.
+    m_wheelAccum += ev->angleDelta();
+    const int notchX = m_wheelAccum.x() / 120;
+    const int notchY = m_wheelAccum.y() / 120;
+    if (notchX != 0 || notchY != 0) {
+        m_wheelAccum -= QPoint(notchX * 120, notchY * 120);
+        emit mouseWheel(notchX, notchY);
+    }
     return true;
 }
 

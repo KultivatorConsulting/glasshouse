@@ -157,6 +157,13 @@ private:
     bool          m_mousePending    = false;
     int           m_pendingMouseX   = 0;
     int           m_pendingMouseY   = 0;
+
+    // Wheel-event accumulator. High-resolution scroll wheels (and
+    // Wayland) deliver angleDelta in sub-notch increments (e.g. ±16 per
+    // event); 120 1/8-degrees == one mouse "notch" and PiKVM expects
+    // ±1 per notch on the wire. Without an accumulator each sub-notch
+    // event rounds to 0 and we drop the scroll entirely.
+    QPoint        m_wheelAccum      = {0, 0};
 };
 
 }  // namespace glasshouse
