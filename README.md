@@ -125,7 +125,7 @@ Default hotkeys (configurable per-PiKVM in YAML):
 
 | Hotkey | Action |
 |---|---|
-| `Ctrl+Alt+Shift+Escape` | Release session-wide capture |
+| `Ctrl+Alt+Shift+Backspace` | Release session-wide capture |
 | `F11`                   | Toggle fullscreen on this window |
 | `Ctrl+Alt+K`            | Show / hide Special Keys palette |
 

@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
 
     QString releaseHotkey = cfg.release_hotkey;
     if (releaseHotkey.isEmpty()) {
-        releaseHotkey = QStringLiteral("Ctrl+Alt+Shift+Escape");
+        releaseHotkey = QStringLiteral("Ctrl+Alt+Shift+Backspace");
     }
     QString fullscreenHotkey = cfg.fullscreen_hotkey;
     if (fullscreenHotkey.isEmpty()) {

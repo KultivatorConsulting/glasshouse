@@ -33,7 +33,7 @@ auth:
     password_ref: secret://pikvm-2-passwd
     insecure_tls: true
 
-release_hotkey: "Ctrl+Alt+Shift+Escape"
+release_hotkey: "Ctrl+Alt+Shift+Backspace"
 
 video:
   prefer_hw_decode: true

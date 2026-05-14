@@ -43,7 +43,7 @@ auth:
     transport: mjpeg
 
 # Hotkeys. Empty / missing values fall back to the defaults shown.
-release_hotkey:      "Ctrl+Alt+Shift+Escape"
+release_hotkey:      "Ctrl+Alt+Shift+Backspace"
 fullscreen_hotkey:   "F11"
 special_keys_hotkey: "Ctrl+Alt+K"
 

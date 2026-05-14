@@ -322,7 +322,7 @@ auth:
     user: admin
     password_ref: secret://pikvm-2-passwd
 
-release_hotkey:      "Ctrl+Alt+Shift+Escape"   # ends session-wide capture
+release_hotkey:      "Ctrl+Alt+Shift+Backspace" # ends session-wide capture
 fullscreen_hotkey:   "F11"                     # toggles per-window fullscreen
 special_keys_hotkey: "Ctrl+Alt+K"              # shows/hides Special Keys palette
 

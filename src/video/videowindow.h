@@ -41,7 +41,7 @@ public:
 
     // Configure the target-coord math and the configurable hotkeys.
     // Must be called before the user can meaningfully capture. Hotkey
-    // strings are QKeySequence-parseable, e.g. "Ctrl+Alt+Shift+Escape" /
+    // strings are QKeySequence-parseable, e.g. "Ctrl+Alt+Shift+Backspace" /
     // "F11" / "Ctrl+Alt+K". Any of the hotkey strings may be empty to
     // disable that toggle.
     void setCaptureContext(const QRect& targetMonitor,
