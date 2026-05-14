@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-14
+
+### Changed
+- Default `release_hotkey` is now `Ctrl+Alt+Shift+Backspace` (was
+  `Ctrl+Alt+Shift+Escape`). All four keys now sit under the natural
+  two-handed Ctrl-Alt-Del shape — left hand on the modifier cluster,
+  right hand on Backspace — instead of forcing both hands into the
+  bottom-left corner. Existing configs with `release_hotkey:` set
+  explicitly are unchanged; only the fallback when the field is
+  empty or missing has moved. Update or remove the field in
+  `~/.config/glasshouse/config.yaml` to pick up the new default.
+
 ## [0.1.2] - 2026-05-13
 
 ### Fixed
@@ -149,7 +161,8 @@ PiKVM web UIs" pattern for managing remote target machines.
   shared source of truth between the Special Keys palette and a
   future keypad daemon, but the daemon itself is separate work.
 
-[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kultivator-consulting/glasshouse/releases/tag/v0.1.0
