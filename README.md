@@ -14,9 +14,14 @@ list of PiKVM API quirks Glasshouse works around live in
 
 ## Status
 
-**v0.1.0 — first release.** All Phase 0–8 work in DESIGN.md §9 is
-complete. The viewer is in daily use against a live two-PiKVM (PiKVM 4
-Plus + PiKVM 3) setup.
+**v0.1.3 — current.** First public release was v0.1.0 in April 2026;
+three patch releases since landed input fixes surfaced by daily use:
+shifted-symbol keys (`?`, `(`, `)`, …) routed via the physical-key
+MDN code, mouse-wheel sub-notch accumulation for high-resolution
+wheels and Wayland touchpads, and an ergonomic release-hotkey
+default (`Ctrl+Alt+Shift+Backspace`). All Phase 0–8 work in
+[DESIGN.md §9](specs/DESIGN.md) is complete. The viewer is in daily
+use against a live two-PiKVM (PiKVM 4 Plus + PiKVM 3) setup.
 
 What works end-to-end today:
 
@@ -45,8 +50,9 @@ What works end-to-end today:
 - `.deb` packaging built by GitHub Actions on tag push, linked against
   system Qt 6.4 from the noble apt archive (no bundled Qt).
 
-Deliberately out of scope for v0.1.0: clipboard sync, audio, macro
-keypad daemon. See [CHANGELOG.md](CHANGELOG.md) for the full list.
+Deliberately out of scope for the 0.1.x line: clipboard sync, audio,
+macro keypad daemon. See [CHANGELOG.md](CHANGELOG.md) for the full
+list.
 
 ## Install (from a release `.deb`)
 
@@ -210,6 +216,9 @@ glasshouse/
 ├── CMakePresets.json           `default` = Debug in ./build; `release` in ./build-release
 ├── CHANGELOG.md                release-by-release changes
 ├── README.md                   you are here
+├── CONTRIBUTING.md             how to file issues, send patches, cut releases
+├── SECURITY.md                 how to report security-affecting bugs
+├── LICENSE                     LGPL-3.0 (top-level for GitHub auto-detection)
 ├── LICENSES/                   LGPL-3.0 + MDI icon NOTICE
 ├── specs/DESIGN.md             architectural source of truth
 ├── pikvm_coord_verify.py       Phase 0 coord-space regression script
@@ -287,18 +296,23 @@ Results are recorded in
 
 ## Contributing
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test, where to file
+issues, conventions, and how releases are cut. Three load-bearing
+rules summarised here:
+
 - **Empirical verifications matter.** When implementation contradicts
   the design (latency, API behaviour, Qt quirks, PiKVM firmware
   surprises), update `specs/DESIGN.md` §10 in the same commit that
-  reveals it. The slots in §10 exist for exactly this.
-- **Tests for pure logic.** Network-heavy behaviour (auth, WS, Janus)
-  is exercised by the harnesses against real hardware. Pure-function
-  code — config validation, coord transform, keymap — must have QTest
-  coverage in `tests/`.
+  reveals it.
+- **Tests for pure logic.** Pure-function code — config validation,
+  coord transform, keymap — must have QTest coverage in `tests/`.
+  Network-heavy behaviour is exercised by the harnesses against real
+  hardware.
 - **Don't modify the PiKVM.** Glasshouse runs against stock firmware;
-  workarounds for firmware quirks live client-side. If you find
-  yourself wanting to patch kvmd or ustreamer, find a client-side
-  path instead.
+  workarounds for firmware quirks live client-side.
+
+Security-affecting bugs go via [SECURITY.md](SECURITY.md) — please
+don't open public issues for those.
 
 ## Design and references
 
@@ -314,10 +328,11 @@ Results are recorded in
 
 ## License
 
-Glasshouse is licensed under
-[**LGPL-3.0-or-later**](LICENSES/LGPL-3.0.txt), matching the dynamic
-Qt 6 linkage requirement (Qt 6 is LGPL v3 with The Qt Company's GPLv3
-exception).
+Glasshouse is licensed under [**LGPL-3.0-or-later**](LICENSE),
+matching the dynamic Qt 6 linkage requirement (Qt 6 is LGPL v3 with
+The Qt Company's GPLv3 exception). Full text lives in
+[LICENSE](LICENSE) at the repo root and at
+[LICENSES/LGPL-3.0.txt](LICENSES/LGPL-3.0.txt).
 
 The MDI greenhouse glyph used as the application icon is distributed
 under the Pictogrammers Free License — see

@@ -1,8 +1,10 @@
 # Multi-Screen PiKVM Desktop Client — Design
 
-**Status:** v0.1.0 shipped — Phases 0–8 complete. Document is now a
-running architectural reference; future work updates it in place
-rather than as a phase plan.
+**Status:** v0.1.3 (latest) — Phases 0–8 complete in v0.1.0; three
+patch releases since (keymap shifted-symbol routing, mouse-wheel
+sub-notch accumulation, ergonomic release-hotkey default). Document
+is now a running architectural reference; future work updates it in
+place rather than as a phase plan.
 **Target platform:** Kubuntu 24.04+ (KDE Plasma 6.x, Wayland)
 **Target laptop OS:** Ubuntu / Linux
 
