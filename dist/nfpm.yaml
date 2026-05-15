@@ -18,7 +18,7 @@ version_schema: semver
 section: net
 priority: optional
 
-maintainer: "Raoul Mackle <developers@kultivator.co.nz>"
+maintainer: "Glasshouse Maintainers <developers@kultivator.co.nz>"
 vendor: "Kultivator Consulting"
 homepage: "https://github.com/kultivator-consulting/glasshouse"
 license: LGPL-3.0
