@@ -20,7 +20,7 @@ bugs. The areas of the code most likely to carry security impact are:
 - Anything that lets a malicious or compromised PiKVM run code on the
   client beyond the documented input/video paths.
 
-Email **raoul.mackle@kultivator.co.nz** with reproduction steps and
+Email **developers@kultivator.co.nz** with reproduction steps and
 the affected version (`glasshouse-viewer --version` or the installed
 `.deb` version from `dpkg -l | grep glasshouse`). Expect an
 acknowledgment within a week. If a fix is non-trivial we'll
