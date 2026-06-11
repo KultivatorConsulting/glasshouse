@@ -37,7 +37,11 @@ release_hotkey: "Ctrl+Alt+Shift+Backspace"
 
 video:
   prefer_hw_decode: true
-  target_fps: 60
+  # Client-side MJPEG frame-rate cap, applied via a pre-decode videorate.
+  # KVM/console work doesn't need 60fps; a lower cap cuts software decode +
+  # colour-convert + render CPU roughly in proportion. 0 = uncapped.
+  # (No effect on the Janus/WebRTC path.)
+  target_fps: 30
 
 windows:
   - target_monitor: 1

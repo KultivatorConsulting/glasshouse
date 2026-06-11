@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
         Instance& inst = instances[i];
 
         QObject::connect(inst.pk, &PiKvmClient::authenticated, &app,
-            [&inst, &app]() {
+            [&inst, &app, &cfg]() {
                 // Tear down stale Janus / pipeline state on re-auth.
                 // The handler is idempotent so the same wiring works
                 // whether this is the first login or a recovery cycle
@@ -458,7 +458,8 @@ int main(int argc, char** argv) {
                     const QString err = inst.mjpeg->start(
                         inst.host,
                         inst.pk->authCookieHeader(),
-                        inst.pk->insecureTls());
+                        inst.pk->insecureTls(),
+                        cfg.video.target_fps);
                     if (!err.isEmpty()) {
                         errln(err);
                         app.exit(3);

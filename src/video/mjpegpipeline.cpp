@@ -136,28 +136,49 @@ MjpegPipeline::~MjpegPipeline() { stop(); }
 
 QString MjpegPipeline::start(const QString& host,
                              const QString& authCookieHeader,
-                             bool insecureTls) {
+                             bool insecureTls,
+                             int  maxFps) {
     if (m_impl) return {};  // already started
 
-    qCInfo(lcVideo) << host << "starting MJPEG pipeline";
+    m_activeDecoder = maxFps > 0
+        ? QStringLiteral("jpegdec ≤%1fps").arg(maxFps)
+        : QStringLiteral("jpegdec");
+    qCInfo(lcVideo).noquote().nospace()
+        << host << " starting MJPEG pipeline: decoder=jpegdec"
+        << (maxFps > 0 ? QStringLiteral(", fps cap=%1").arg(maxFps)
+                       : QStringLiteral(", fps uncapped"));
 
-    // gst_parse_launch handles the multipartdemux→jpegdec dynamic-pad link
+    // Frame-rate cap, placed *before* jpegdec so surplus frames are dropped
+    // while still encoded — the cap then bounds software decode, convert,
+    // and the main-thread render together. jpegparse gives videorate a
+    // cleanly-framed, timestamped JPEG stream to rate-limit on. `max-rate`
+    // implies drop-only (no duplicates). Omitted entirely when maxFps<=0.
+    // (HW JPEG decode is deliberately not attempted: nvjpegdec rejects
+    // ustreamer's 4:2:2 subsampling — see the header note / DESIGN §10.6.)
+    const QString rateClause = maxFps > 0
+        ? QStringLiteral("jpegparse ! videorate max-rate=%1 ! ").arg(maxFps)
+        : QString();
+
+    // gst_parse_launch handles the multipartdemux→decoder dynamic-pad link
     // for us. The cookie array is set programmatically because GStreamer's
     // launch-string syntax doesn't carry GStrv values cleanly.
-    const QString desc = QStringLiteral(
-        "souphttpsrc name=src "
-            "location=\"https://%1/streamer/stream\" "
-            "is-live=true "
-            "ssl-strict=%2 "
-            "user-agent=\"glasshouse\" "
-        "! multipartdemux "
-        "! image/jpeg "
-        "! jpegdec "
-        "! videoconvert "
-        "! video/x-raw,format=BGRA "
-        "! appsink name=sink emit-signals=true sync=false "
-                  "drop=true max-buffers=2"
-    ).arg(host).arg(insecureTls ? "false" : "true");
+    const QString desc =
+        QStringLiteral(
+            "souphttpsrc name=src "
+                "location=\"https://%1/streamer/stream\" "
+                "is-live=true "
+                "ssl-strict=%2 "
+                "user-agent=\"glasshouse\" "
+            "! multipartdemux "
+            "! image/jpeg "
+            "! ").arg(host).arg(insecureTls ? "false" : "true")
+        + rateClause
+        + QStringLiteral(
+            "jpegdec "
+            "! videoconvert "
+            "! video/x-raw,format=BGRA "
+            "! appsink name=sink emit-signals=true sync=false "
+                      "drop=true max-buffers=2");
 
     GError* err = nullptr;
     GstElement* pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);

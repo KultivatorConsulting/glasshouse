@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MJPEG client-side frame-rate cap.** `video.target_fps` (previously
+  parsed but unused) now caps the MJPEG frame rate via a pre-decode
+  `jpegparse ! videorate max-rate=N`. Dropping surplus frames while they
+  are still encoded means the cap cuts software decode, colour-convert,
+  and main-thread render together — measured roughly linear with the cap.
+  The example configs now ship `target_fps: 30`, which substantially
+  lowers viewer CPU on multi-stream MJPEG setups. Hardware JPEG decode was
+  evaluated and ruled out: ustreamer emits 4:2:2 baseline JPEG, which
+  NVIDIA's `nvjpegdec` rejects with not-negotiated (and `vajpegdec` is
+  absent on NVIDIA), so software `jpegdec` remains the only viable
+  decoder for the real stream. See DESIGN.md §10.6.
+
 ## [0.1.3] - 2026-05-14
 
 ### Changed

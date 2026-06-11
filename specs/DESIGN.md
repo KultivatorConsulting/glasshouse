@@ -340,7 +340,8 @@ shortcuts:
 
 video:
   prefer_hw_decode: true    # VA-API; software fallback on init failure
-  target_fps: 60
+  target_fps: 30            # MJPEG only: client-side cap via a pre-decode
+                            # videorate (§10.6). 0 = uncapped; no effect on Janus.
 
 # One entry per target monitor; target_monitor must reference an id in
 # target.monitors. Length must equal length of target.monitors.
@@ -727,6 +728,44 @@ that path exclusively.
   Both are private-but-stable protocols; check those files first if
   the session starts refusing the configured plugin or the offer shape
   changes.
+
+### 10.6 MJPEG transport CPU profile (verified 2026-06-12)
+
+Two 1080p PiKVMs on `transport: mjpeg` were observed at ~150% CPU in a
+single `glasshouse-viewer` process. Investigated against the live PiKVM 4
+Plus (`192.168.1.71`, kvmd 3.199, ustreamer 5.37) on an NVIDIA RTX 3070 Ti
+client.
+
+* **Where the CPU goes** (per-thread, streams flowing): ~70% main thread
+  (QVideoWidget render of two 1080p BGRA frames), ~40% across the
+  `souphttpsrc` streaming threads (HTTPS receive + TLS + multipart demux),
+  ~30% software `jpegdec` + `videoconvert`.
+* **ustreamer emits 4:2:2 baseline JPEG** (`2x1,1x1,1x1` sampling, SOF0),
+  1920×1080 — confirmed by carving a frame off `/streamer/stream`.
+* **Hardware JPEG decode is not viable for this stream.** NVIDIA's
+  `nvjpegdec` decodes a synthetic 4:2:0 JPEG but rejects ustreamer's real
+  4:2:2 frames with `not-negotiated (-4)` (pipeline reaches PLAYING, dies
+  on the first buffer) — with or without `jpegparse` / `cudadownload`.
+  `vajpegdec` / `v4l2jpegdec` aren't present on NVIDIA at all. `jpegdec`
+  (software) is the only decoder that handles the real stream. **Do not
+  re-add `nvjpegdec` to the MJPEG path** expecting it to work on stock
+  PiKVM output.
+* **Client-side frame-rate cap.** `video.target_fps` (previously parsed but
+  unused) now inserts `jpegparse ! videorate max-rate=N` *before* jpegdec.
+  Dropping surplus frames while still encoded makes the cap cut software
+  decode, colour-convert, and main-thread render together. Measured linear:
+  a synthetic 1080p 4:2:2 stream costs 18% CPU at 60fps vs 9% at a 30fps
+  cap (decode+convert; render scales the same way). `max-rate` implies
+  drop-only, so a static screen (ustreamer `drop-same-frames`) costs
+  nothing.
+* **The `souphttpsrc` receive cost (~40%) is a floor** the client can't
+  shrink: every frame the server sends is received and TLS-decrypted before
+  any client-side drop point. kvmd here advertises `desired_fps: 40`, so a
+  30fps cap trims a flowing stream ~25%; lower the cap for more.
+* **For genuinely low decode CPU the answer is H.264, not HW JPEG.**
+  `transport: janus` with `nvh264dec` is hardware-decoded and ~10× less
+  bandwidth, but carries the §10.5 `webrtcbin` leak. The MJPEG fps cap is
+  the leak-free middle ground.
 
 ## 11. Risks and mitigations
 
