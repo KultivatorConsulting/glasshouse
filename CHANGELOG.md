@@ -7,18 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Cursor confinement during capture (X11).** While capture is held, the
+  pointer is now penned inside the bounding rectangle of the session windows
+  using XFixes pointer barriers, so it can't drift onto the local desktop or
+  another monitor and misroute keystrokes into the wrong window. Barriers are
+  server-side (no pointer grab, no cursor warping), so — unlike the briefly
+  attempted `QCursor::setPos` approach — they can't feed events back and
+  freeze input; verified to confine and release cleanly on a live session.
+  X11 only; Wayland would need the compositor pointer-constraints protocol
+  (not yet implemented), where confinement is a no-op.
+- **Video latency: >1 s of glass-to-glass lag from unbounded client-side
+  buffering.** Three reservoirs, all client-side, none a codec change:
+  - Janus/H.264: the pre-decode `queue` inherited GStreamer's 1 s,
+    non-leaky default and filled on any decode stall. Now bounded to a
+    few buffers (non-leaky — dropping encoded H.264 mid-GOP would corrupt
+    decode until the next IDR; loss is left to webrtcbin's jitterbuffer).
+  - MJPEG: added a `queue leaky=downstream` after `multipartdemux` as a
+    deterministic stale-frame dropper (MJPEG is all-intra, so dropping is
+    safe). Previously nothing shed frames ahead of the software decoder,
+    so a slow client backed frames up in `souphttpsrc` + the socket.
+  - Both transports: decoded frames were posted to the GUI thread on an
+    unbounded queued connection; a latest-frame mailbox now coalesces to
+    the newest frame so a slow render can't accumulate lag.
+  See DESIGN.md §10.2.
+
 ### Added
-- **MJPEG client-side frame-rate cap.** `video.target_fps` (previously
-  parsed but unused) now caps the MJPEG frame rate via a pre-decode
-  `jpegparse ! videorate max-rate=N`. Dropping surplus frames while they
-  are still encoded means the cap cuts software decode, colour-convert,
-  and main-thread render together — measured roughly linear with the cap.
-  The example configs now ship `target_fps: 30`, which substantially
-  lowers viewer CPU on multi-stream MJPEG setups. Hardware JPEG decode was
-  evaluated and ruled out: ustreamer emits 4:2:2 baseline JPEG, which
-  NVIDIA's `nvjpegdec` rejects with not-negotiated (and `vajpegdec` is
-  absent on NVIDIA), so software `jpegdec` remains the only viable
-  decoder for the real stream. See DESIGN.md §10.6.
+- **Local cursor marker during capture.** Instead of hiding the pointer,
+  capture draws a zero-lag local marker (a haloed ring + centre dot by
+  default) at the true pointer position. Because PiKVM is absolute-positioned
+  and the video is a 1:1 letterboxed view, the guest cursor converges to it,
+  so pointing feels instant despite video latency; clicks ripple the marker.
+  Configurable via `video.cursor_marker` (`ring` | `crosshair` | `hidden`),
+  `cursor_marker_color` (`#RRGGBB`), and `cursor_marker_size` (px).
+- **Configurable WebRTC jitterbuffer latency.** `video.webrtc_latency_ms`
+  (default 100 ms, down from webrtcbin's 200) tunes the Janus/H.264
+  jitterbuffer dwell — lower trims glass-to-glass latency on a LAN at the
+  cost of jitter tolerance. No effect on MJPEG.
+- **Steady-state video telemetry.** The status bar shows effective render
+  FPS and the GUI-thread coalesced-drop count (`video: N fps · M
+  coalesced`), polled at 1 Hz; the same line logs under
+  `glasshouse.video.debug`. See DESIGN.md §10.2.
+- **MJPEG path tuned for low latency.** Pre-decode buffering keeps only the
+  single freshest JPEG (`queue leaky=downstream max-size-buffers=1`) and one
+  decoded frame at the sink (`appsink max-buffers=1`), so the picture tracks
+  input as tightly as software decode allows. The earlier `jpegparse !
+  videorate max-rate=N` fps cap was removed — on ustreamer's untimestamped
+  stream it never capped (GStreamer #720104), only added latency, and froze
+  the video outright with `drop-only=true`. `video.target_fps` is no longer
+  enforced on MJPEG.
+  Hardware JPEG decode was evaluated and ruled out: ustreamer emits 4:2:2
+  baseline JPEG, which NVIDIA's `nvjpegdec` rejects with not-negotiated
+  (and `vajpegdec` is absent on NVIDIA), so software `jpegdec` remains the
+  only viable decoder for the real stream. See DESIGN.md §10.6.
 
 ## [0.1.3] - 2026-05-14
 

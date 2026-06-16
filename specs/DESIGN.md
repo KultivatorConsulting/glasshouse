@@ -568,13 +568,54 @@ signed s16 range on the wire. For client purposes this is transparent
 * Step `(16384, 0)` separately verified to land at the center of the
   right-hand monitor, confirming full-desktop spanning.
 
-### 10.2 Video latency — TBD (Phase 2)
-* H.264 over WebSocket end-to-end latency (clock-on-screen test):
-  _____________________ ms
-* VA-API decode confirmed active (via `GST_DEBUG=4` or `gst-inspect`):
+### 10.2 Video latency (investigated 2026-06-16)
+
+The viewer accumulated >1 s of glass-to-glass lag. Root cause was
+**unbounded client-side buffering**, not the codec or the network — and
+it stayed invisible because nothing measured steady-state latency (only
+auth-to-first-frame). Three reservoirs, all client-side:
+
+* **Janus/H.264** — the pad-added `queue` was untuned, inheriting
+  GStreamer's defaults (`max-size-time=1s`, non-leaky). A decode stall
+  filled it to a full second that never drained. Now bounded to a few
+  buffers, non-leaky (`videopipeline.cpp`). Dropping *encoded* H.264
+  mid-GOP would corrupt decode until the next IDR, so loss is left to
+  webrtcbin's jitterbuffer — whose dwell is now configurable via
+  `video.webrtc_latency_ms` (default 100 ms, down from webrtcbin's 200).
+* **MJPEG** — ustreamer coalesces to the latest frame server-side
+  (`ustreamer/http/server.c`), so a slow client backs frames up in
+  `souphttpsrc` + the kernel socket; lag grows until TCP backpressure
+  throttles the server. A `queue leaky=downstream max-size-buffers=2`
+  after `multipartdemux` is now the deterministic dropper (MJPEG is
+  all-intra, so dropping any frame is safe). `videorate` is *not* a
+  reliable dropper here — see §10.6.
+* **Both** — every decoded frame was posted to the GUI thread via a
+  queued connection (unbounded Qt event queue). A `FrameMailbox` now
+  keeps one delivery in flight and coalesces to the newest frame.
+
+**Instrumentation.** The status bar shows effective render FPS and the
+GUI-thread coalesced-drop count (`video: 24.0 fps · N coalesced`), polled
+at 1 Hz from per-pipeline counters; the same line logs under
+`glasshouse.video.debug`. A rising coalesced count under load is the
+direct signal that shedding is holding latency bounded instead of letting
+it grow.
+
+**True glass-to-glass — manual clock-on-screen procedure** (the only
+honest way to a millisecond number; not automatable client-side because
+ustreamer exposes no per-frame capture timestamp the GStreamer path can
+read):
+1. Run a millisecond stopwatch full-screen on the *target* (an online ms
+   timer, or `while :; do date +%H:%M:%S.%3N; done`).
+2. Photograph the target's real HDMI output and the Glasshouse window in
+   one shot (phone camera).
+3. Latency = displayed-target-time − displayed-viewer-time; average a few
+   shots. Measure on the real LAN — Wi-Fi between client and PiKVM
+   dominates everything else.
+
+* H.264/Janus glass-to-glass: _____________________ ms
+* MJPEG glass-to-glass:       _____________________ ms
+* HW decode active (`GST_DEBUG=4` / status-bar decoder label):
   _____________________
-* Software decode latency (for comparison):
-  _____________________ ms
 
 ### 10.3 Qt Wayland pointer constraint — TBD (Phase 3)
 * Capture/release cycle reliable on Plasma 6.x:
@@ -657,7 +698,10 @@ that path exclusively.
   `queue ! rtph264depay ! h264parse config-interval=-1 ! <decoder> !
   videoconvert ! video/x-raw,format=BGRA ! appsink`. `config-interval=-1`
   re-inserts SPS/PPS before every IDR so decoders that lose their
-  stream header on concealment still recover.
+  stream header on concealment still recover. The `queue` is bounded
+  (non-leaky, a few buffers) rather than left at its 1 s default — see
+  §10.2 for why dropping *encoded* H.264 here is unsafe and loss is left
+  to the jitterbuffer instead.
 * If you see "probe received SDP offer then the server closed" during
   the signalling probe: normal. The ustreamer plugin drops handles that
   never answer. The viewer path answers promptly, so the session stays
@@ -750,14 +794,17 @@ client.
   (software) is the only decoder that handles the real stream. **Do not
   re-add `nvjpegdec` to the MJPEG path** expecting it to work on stock
   PiKVM output.
-* **Client-side frame-rate cap.** `video.target_fps` (previously parsed but
-  unused) now inserts `jpegparse ! videorate max-rate=N` *before* jpegdec.
-  Dropping surplus frames while still encoded makes the cap cut software
-  decode, colour-convert, and main-thread render together. Measured linear:
-  a synthetic 1080p 4:2:2 stream costs 18% CPU at 60fps vs 9% at a 30fps
-  cap (decode+convert; render scales the same way). `max-rate` implies
-  drop-only, so a static screen (ustreamer `drop-same-frames`) costs
-  nothing.
+* **Client-side frame-rate cap — removed (2026-06-17).** `video.target_fps`
+  used to insert `jpegparse ! videorate max-rate=N` before jpegdec, but on
+  ustreamer's untimestamped multipartdemux output `videorate` never actually
+  capped (it decides drop/dup from buffer PTS — GStreamer #720104), only
+  added a frame of latency, and froze the stream outright when given
+  `drop-only=true` (passed the first frame, dropped the rest — caught via the
+  delivered/coalesced telemetry). It's gone; jpegdec decodes the demuxed
+  JPEGs directly and the `queue leaky=downstream max-size-buffers=1` ahead of
+  it governs frames (dropping stale ones under load). `video.target_fps` is
+  no longer enforced on MJPEG; a real CPU-oriented fps cap would need a
+  timestamp-independent dropper — separate work.
 * **The `souphttpsrc` receive cost (~40%) is a floor** the client can't
   shrink: every frame the server sends is received and TLS-decrypted before
   any client-side drop point. kvmd here advertises `desired_fps: 40`, so a

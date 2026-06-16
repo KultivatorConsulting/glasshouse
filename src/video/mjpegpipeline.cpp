@@ -15,8 +15,27 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <mutex>
 
 namespace glasshouse {
+
+namespace {
+// Latest-frame mailbox: bounds the GUI-thread delivery reservoir. The
+// appsink's drop=true / max-buffers=2 only bounds *decoded* frames waiting
+// on our pull; once a frame is marshalled to the GUI thread via a queued
+// connection, a slow render thread would let those deliveries pile up
+// unbounded in the Qt event loop. Stashing only the freshest frame and
+// keeping at most one delivery in flight means the viewer jumps to the
+// latest frame instead of draining a backlog.
+struct FrameMailbox {
+    std::mutex           mutex;
+    QVideoFrame          latest;
+    std::atomic<bool>    pending{false};
+    std::atomic<quint64> delivered{0};   // frames painted to the sink
+    std::atomic<quint64> coalesced{0};   // frames skipped (GUI thread behind)
+};
+}  // namespace
 
 struct MjpegPipeline::Impl {
     QPointer<QVideoSink>     sink;
@@ -26,6 +45,7 @@ struct MjpegPipeline::Impl {
     GstElement* appsink  = nullptr;
 
     std::atomic<bool>        firstFrameEmitted{false};
+    std::shared_ptr<FrameMailbox> mailbox = std::make_shared<FrameMailbox>();
 
     ~Impl() {
         if (pipeline) {
@@ -83,17 +103,38 @@ struct MjpegPipeline::Impl {
         gst_buffer_unmap(buf, &map);
         gst_sample_unref(sample);
 
-        QPointer<QVideoSink>     sinkPtr  = self->sink;
-        QPointer<MjpegPipeline>  ownerPtr = self->owner;
+        // Coalesce delivery onto the GUI thread (see FrameMailbox above):
+        // stash the freshest frame and schedule at most one pending paint.
+        auto mailbox = self->mailbox;
+        {
+            std::lock_guard<std::mutex> lk(mailbox->mutex);
+            mailbox->latest = frame;
+        }
         const bool wasFirst = !self->firstFrameEmitted.exchange(true);
-
-        QMetaObject::invokeMethod(sinkPtr,
-            [sinkPtr, ownerPtr, frame, wasFirst]() mutable {
-                if (!sinkPtr) return;
-                sinkPtr->setVideoFrame(frame);
-                if (wasFirst && ownerPtr) emit ownerPtr->firstFrameRendered();
-            },
-            Qt::QueuedConnection);
+        if (mailbox->pending.exchange(true)) {
+            // A paint is already queued; this frame supersedes the previous
+            // undelivered one (GUI thread behind) — count it as coalesced.
+            mailbox->coalesced.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            QPointer<QVideoSink>     sinkPtr  = self->sink;
+            QPointer<MjpegPipeline>  ownerPtr = self->owner;
+            QMetaObject::invokeMethod(sinkPtr,
+                [mailbox, sinkPtr, ownerPtr, wasFirst]() mutable {
+                    // Clear before snapshotting so a frame arriving mid-paint
+                    // schedules the next delivery rather than being stranded.
+                    mailbox->pending.store(false);
+                    QVideoFrame f;
+                    {
+                        std::lock_guard<std::mutex> lk(mailbox->mutex);
+                        f = mailbox->latest;
+                    }
+                    if (!sinkPtr) return;
+                    sinkPtr->setVideoFrame(f);
+                    mailbox->delivered.fetch_add(1, std::memory_order_relaxed);
+                    if (wasFirst && ownerPtr) emit ownerPtr->firstFrameRendered();
+                },
+                Qt::QueuedConnection);
+        }
 
         return GST_FLOW_OK;
     }
@@ -140,27 +181,31 @@ QString MjpegPipeline::start(const QString& host,
                              int  maxFps) {
     if (m_impl) return {};  // already started
 
-    m_activeDecoder = maxFps > 0
-        ? QStringLiteral("jpegdec ≤%1fps").arg(maxFps)
-        : QStringLiteral("jpegdec");
+    m_activeDecoder = QStringLiteral("jpegdec");
     qCInfo(lcVideo).noquote().nospace()
-        << host << " starting MJPEG pipeline: decoder=jpegdec"
-        << (maxFps > 0 ? QStringLiteral(", fps cap=%1").arg(maxFps)
-                       : QStringLiteral(", fps uncapped"));
+        << host << " starting MJPEG pipeline: jpegdec, frames governed by the"
+        << " leaky queue (videorate cap removed)";
+    if (maxFps > 0) {
+        qCInfo(lcVideo).nospace() << host << " note: video.target_fps="
+            << maxFps << " is not enforced on MJPEG (videorate was a no-op on"
+            << " the untimestamped stream — see DESIGN §10.6)";
+    }
 
-    // Frame-rate cap, placed *before* jpegdec so surplus frames are dropped
-    // while still encoded — the cap then bounds software decode, convert,
-    // and the main-thread render together. jpegparse gives videorate a
-    // cleanly-framed, timestamped JPEG stream to rate-limit on. `max-rate`
-    // implies drop-only (no duplicates). Omitted entirely when maxFps<=0.
-    // (HW JPEG decode is deliberately not attempted: nvjpegdec rejects
-    // ustreamer's 4:2:2 subsampling — see the header note / DESIGN §10.6.)
-    const QString rateClause = maxFps > 0
-        ? QStringLiteral("jpegparse ! videorate max-rate=%1 ! ").arg(maxFps)
-        : QString();
-
-    // gst_parse_launch handles the multipartdemux→decoder dynamic-pad link
-    // for us. The cookie array is set programmatically because GStreamer's
+    // Latency control is the leaky-downstream `queue` before jpegdec. MJPEG is
+    // all-intra, so dropping a whole JPEG is safe; keeping only the single
+    // freshest buffer (max-size-buffers=1) stops a slow decode/render from
+    // backing stale frames up in souphttpsrc + the kernel socket — the real
+    // source of MJPEG lag, since ustreamer only ever holds the latest frame so
+    // any backlog is on us. The former `jpegparse ! videorate max-rate=N` cap
+    // was removed: on ustreamer's untimestamped multipartdemux output
+    // videorate never actually capped (GStreamer #720104), only added a frame
+    // of latency, and froze the stream outright with drop-only=true. jpegdec
+    // decodes the demuxed JPEG buffers directly. (HW JPEG decode is
+    // deliberately not attempted: nvjpegdec rejects ustreamer's 4:2:2
+    // subsampling — see the header note / DESIGN §10.6.)
+    //
+    // gst_parse_launch handles the multipartdemux→jpegdec dynamic-pad link.
+    // The cookie array is set programmatically because GStreamer's
     // launch-string syntax doesn't carry GStrv values cleanly.
     const QString desc =
         QStringLiteral(
@@ -171,14 +216,14 @@ QString MjpegPipeline::start(const QString& host,
                 "user-agent=\"glasshouse\" "
             "! multipartdemux "
             "! image/jpeg "
-            "! ").arg(host).arg(insecureTls ? "false" : "true")
-        + rateClause
-        + QStringLiteral(
-            "jpegdec "
+            "! queue leaky=downstream max-size-buffers=1 "
+                    "max-size-bytes=0 max-size-time=0 "
+            "! jpegdec "
             "! videoconvert "
             "! video/x-raw,format=BGRA "
             "! appsink name=sink emit-signals=true sync=false "
-                      "drop=true max-buffers=2");
+                      "drop=true max-buffers=1")
+            .arg(host).arg(insecureTls ? "false" : "true");
 
     GError* err = nullptr;
     GstElement* pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
@@ -230,6 +275,14 @@ QString MjpegPipeline::start(const QString& host,
 
 void MjpegPipeline::stop() {
     m_impl.reset();
+}
+
+quint64 MjpegPipeline::framesDelivered() const {
+    return m_impl ? m_impl->mailbox->delivered.load(std::memory_order_relaxed) : 0;
+}
+
+quint64 MjpegPipeline::framesCoalesced() const {
+    return m_impl ? m_impl->mailbox->coalesced.load(std::memory_order_relaxed) : 0;
 }
 
 }  // namespace glasshouse

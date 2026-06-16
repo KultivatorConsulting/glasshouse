@@ -5,7 +5,13 @@ qt_add_library(glasshouse_video STATIC
     janusclient.h       janusclient.cpp
     specialkeysdialog.h specialkeysdialog.cpp
     msddialog.h         msddialog.cpp
+    pointerconfiner.h   pointerconfiner.cpp
 )
+
+# X11 + XFixes for server-side pointer-barrier confinement during capture
+# (pointerconfiner.cpp). X11-only; the code no-ops on other platforms but the
+# link is unconditional — this is a Linux/X11-targeted client.
+pkg_check_modules(X11FIXES REQUIRED IMPORTED_TARGET x11 xfixes)
 
 target_link_libraries(glasshouse_video
     PUBLIC
@@ -20,6 +26,7 @@ target_link_libraries(glasshouse_video
     PRIVATE
         glasshouse_core
         PkgConfig::GStreamer
+        PkgConfig::X11FIXES
 )
 
 target_include_directories(glasshouse_video

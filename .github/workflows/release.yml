@@ -36,7 +36,9 @@ jobs:
             gstreamer1.0-plugins-bad \
             gstreamer1.0-nice \
             gstreamer1.0-libav \
-            libnice-dev
+            libnice-dev \
+            libx11-dev \
+            libxfixes-dev
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

@@ -6,7 +6,11 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
 #include <QCursor>
+#include <QPainter>
+#include <QPen>
+#include <QPixmap>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -47,6 +51,41 @@ int encodeHotkey(const QString& s) {
     return seq[0].toCombined();
 }
 
+// Build a ring-marker pixmap: a haloed coloured ring with a centre dot. The
+// dark halo keeps it visible on any background. `pulseT` in [0,1] adds an
+// expanding, fading outer ring for the click ripple; pulseT < 0 draws no
+// pulse. The canvas leaves room around the ring for the pulse to grow into,
+// and the hotspot is the canvas centre so the marker point never shifts.
+QPixmap drawMarkerPixmap(int size, const QColor& color, double pulseT) {
+    const int ring   = qBound(10, size, 64);
+    const int canvas = ring * 2 + 8;
+    QPixmap pm(canvas, canvas);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QPointF ctr(canvas / 2.0, canvas / 2.0);
+    auto stroke = [&](double dia, const QColor& col, double w) {
+        QPen pen(col); pen.setWidthF(w);
+        p.setPen(pen); p.setBrush(Qt::NoBrush);
+        p.drawEllipse(ctr, dia / 2.0, dia / 2.0);
+    };
+    stroke(ring + 1.0, QColor(0, 0, 0, 150), 3.0);   // dark halo
+    stroke(ring,       color,                2.0);   // coloured ring
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 150)); p.drawEllipse(ctr, 2.4, 2.4);
+    p.setBrush(color);                p.drawEllipse(ctr, 1.4, 1.4);  // centre dot
+    if (pulseT >= 0.0) {
+        const double dia = ring + ring * 0.9 * pulseT;
+        QColor pc = color; pc.setAlpha(int(170.0 * (1.0 - pulseT)));
+        stroke(dia, pc, 2.5);
+    }
+    p.end();
+    return pm;
+}
+QCursor cursorFromPixmap(const QPixmap& pm) {
+    return QCursor(pm, pm.width() / 2, pm.height() / 2);  // hotspot = centre
+}
+
 }  // namespace
 
 VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
@@ -63,11 +102,13 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     m_statusLabel  = new QLabel(QStringLiteral("(connecting)"), this);
     m_decoderLabel = new QLabel(QStringLiteral("decoder: -"),   this);
     m_latencyLabel = new QLabel(QStringLiteral("latency: -"),   this);
+    m_statsLabel   = new QLabel(QStringLiteral("video: -"),     this);
 
     auto* bar = statusBar();
     bar->addWidget(m_statusLabel, 1);
     bar->addPermanentWidget(m_decoderLabel);
     bar->addPermanentWidget(m_latencyLabel);
+    bar->addPermanentWidget(m_statsLabel);
 
     // Pre-capture: mouse events arrive on the video widget; we peek at them
     // via an event filter to detect the click-to-capture trigger, but
@@ -83,6 +124,13 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     connect(m_mouseFlushTimer, &QTimer::timeout, this,
             &VideoWindow::flushMousePending);
     m_mouseFlushTimer->start();
+
+    // Click-pulse animation timer (drives stepPulse). A default ring marker is
+    // built now; main.cpp overrides it via setCursorMarker() once config loads.
+    m_pulseTimer = new QTimer(this);
+    m_pulseTimer->setInterval(30);  // ~5 frames ≈ 150 ms ripple
+    connect(m_pulseTimer, &QTimer::timeout, this, &VideoWindow::stepPulse);
+    setCursorMarker(QStringLiteral("ring"), QStringLiteral("#FFA000"), 24);
 
     buildMenuBar();
 }
@@ -269,6 +317,9 @@ void VideoWindow::setDecoderLabel(const QString& decoder) {
 void VideoWindow::setLatencyLabel(const QString& latency) {
     m_latencyLabel->setText(QStringLiteral("latency: %1").arg(latency));
 }
+void VideoWindow::setVideoStats(const QString& stats) {
+    m_statsLabel->setText(QStringLiteral("video: %1").arg(stats));
+}
 
 // ---------------------------------------------------------------------------
 
@@ -282,11 +333,13 @@ void VideoWindow::startCapture() {
     // just the anchor — there's no per-window capture state to enforce
     // across siblings.
 
-    // App-wide blank cursor so the cursor stays invisible while it's
-    // moved across sibling windows. Native window decorations remain
-    // window-manager-drawn; that mismatch is acceptable in practice
-    // because the user types into the target, not the title bar.
-    QApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
+    // Local cursor marker: instead of hiding the pointer, show a zero-lag
+    // marker (a ring by default) at the true pointer position. Because PiKVM
+    // is absolute-positioned and the video is a 1:1 letterboxed view, that's
+    // exactly where the guest cursor lands — the marker leads, the laggy guest
+    // cursor trails and converges, masking perceived mouse latency.
+    // Style/colour/size come from setCursorMarker(). (Assumes absolute mode.)
+    QApplication::setOverrideCursor(m_markerCursor);
 
     // grabMouse so events keep arriving at this widget even when the
     // cursor is physically over a sibling window's video area.
@@ -295,6 +348,11 @@ void VideoWindow::startCapture() {
     // a different window starting capture later does the right thing.
     m_video->grabMouse();
     m_video->grabKeyboard();
+
+    // Pen the pointer inside the session windows so it can't drift onto the
+    // local desktop / another monitor and misroute input. Server-side X11
+    // barriers — no warp, no grab feedback, so it can't stall the event loop.
+    m_confiner.confineToBounds(sessionWindowRects());
 
     qCInfo(lcHid) << "capture started";
     emit captureStateChanged(true);
@@ -318,6 +376,9 @@ void VideoWindow::stopCapture() {
 
     m_video->releaseKeyboard();
     m_video->releaseMouse();
+    m_confiner.release();
+    if (m_pulseTimer) m_pulseTimer->stop();
+    m_pulseStep = 0;
     QApplication::restoreOverrideCursor();
 
     qCInfo(lcHid) << "capture released";
@@ -384,8 +445,23 @@ bool VideoWindow::handleMouseButton(QMouseEvent* ev, bool pressed) {
     m_pendingMouseY = api.y;
     m_mousePending  = true;
     flushMousePending();
+
+    // Click ripple: pulse the marker on press (ring style only).
+    if (pressed && !m_pulseCursors.isEmpty()) {
+        m_pulseStep = 0;
+        if (!m_pulseTimer->isActive()) m_pulseTimer->start();
+    }
     emit mouseButton(*btn, pressed);
     return true;
+}
+
+QList<QRect> VideoWindow::sessionWindowRects() const {
+    QList<QRect> rects;
+    for (const auto& sib : m_siblings) {
+        if (sib) rects.append(sib->frameGeometry());
+    }
+    if (rects.isEmpty()) rects.append(frameGeometry());
+    return rects;
 }
 
 bool VideoWindow::handleMouseMove(QMouseEvent* ev) {
@@ -401,6 +477,37 @@ void VideoWindow::flushMousePending() {
     if (!m_mousePending) return;
     m_mousePending = false;
     emit mouseMoved(m_pendingMouseX, m_pendingMouseY);
+}
+
+void VideoWindow::setCursorMarker(const QString& style, const QString& color,
+                                  int size) {
+    m_markerStyle = style.trimmed().toLower();
+    m_pulseCursors.clear();
+    if (m_markerStyle == QLatin1String("hidden")) {
+        m_markerCursor = QCursor(Qt::BlankCursor);
+    } else if (m_markerStyle == QLatin1String("crosshair")) {
+        m_markerCursor = QCursor(Qt::CrossCursor);
+    } else {
+        m_markerStyle = QStringLiteral("ring");
+        QColor c(color);
+        if (!c.isValid()) c = QColor(QStringLiteral("#FFA000"));
+        m_markerCursor = cursorFromPixmap(drawMarkerPixmap(size, c, -1.0));
+        for (double t : {0.0, 0.22, 0.45, 0.7, 1.0})
+            m_pulseCursors.append(cursorFromPixmap(drawMarkerPixmap(size, c, t)));
+    }
+    // Apply immediately if a capture is already in progress.
+    if (m_captured) QApplication::changeOverrideCursor(m_markerCursor);
+}
+
+void VideoWindow::stepPulse() {
+    if (!m_captured || m_pulseStep >= m_pulseCursors.size()) {
+        m_pulseTimer->stop();
+        if (m_captured) QApplication::changeOverrideCursor(m_markerCursor);
+        m_pulseStep = 0;
+        return;
+    }
+    QApplication::changeOverrideCursor(m_pulseCursors[m_pulseStep]);
+    ++m_pulseStep;
 }
 
 bool VideoWindow::handleWheel(QWheelEvent* ev) {

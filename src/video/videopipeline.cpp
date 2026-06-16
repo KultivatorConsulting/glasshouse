@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <mutex>
 
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -25,6 +27,20 @@
 namespace glasshouse {
 
 namespace {
+
+// Latest-frame mailbox: bounds the GUI-thread delivery reservoir. appsink
+// drop=true / max-buffers=2 only bounds *decoded* frames awaiting our pull;
+// once a frame is marshalled to the GUI thread, a slow render thread would
+// let queued-connection deliveries pile up unbounded in the Qt event loop.
+// Stashing the freshest frame and keeping one delivery in flight means the
+// viewer always jumps to the latest frame instead of draining a backlog.
+struct FrameMailbox {
+    std::mutex           mutex;
+    QVideoFrame          latest;
+    std::atomic<bool>    pending{false};
+    std::atomic<quint64> delivered{0};   // frames painted to the sink
+    std::atomic<quint64> coalesced{0};   // frames skipped (GUI thread behind)
+};
 
 // Probe available H.264 decoder factories in descending preference order.
 // Same policy as the previous H.264-over-WS path — HW first, libav fallback.
@@ -56,6 +72,7 @@ struct VideoPipeline::Impl {
 
     std::atomic<bool>        firstFrameEmitted{false};
     std::atomic<bool>        answerEmitted{false};
+    std::shared_ptr<FrameMailbox> mailbox = std::make_shared<FrameMailbox>();
 
     ~Impl() {
         if (pipeline) {
@@ -129,6 +146,21 @@ struct VideoPipeline::Impl {
                                << "(decoder=" << self->decoder << ")";
             return;
         }
+
+        // Bound the pre-decode queue. A default queue caps at
+        // max-size-time=1s (non-leaky), so a decode stall lets a full second
+        // of H.264 pile up and never drain — a steady ~1 s of lag. Cap it to
+        // a few buffers instead. We must NOT make this queue leaky: dropping
+        // *encoded* H.264 mid-GOP corrupts decode until the next IDR.
+        // Backpressure here instead pushes loss up to webrtcbin's
+        // jitterbuffer, which sheds it safely (concealment + keyframe
+        // request). Decoded-frame coalescing happens GUI-side (FrameMailbox).
+        g_object_set(queue,
+            "max-size-buffers", static_cast<guint>(3),
+            "max-size-bytes",   static_cast<guint>(0),
+            "max-size-time",    G_GUINT64_CONSTANT(0),
+            "leaky",            0,  // GST_QUEUE_NO_LEAK
+            nullptr);
 
         // h264parse config-interval=-1: re-inject SPS/PPS before every IDR.
         // Protects decoders that don't retain them from the stream header.
@@ -221,18 +253,39 @@ struct VideoPipeline::Impl {
         gst_buffer_unmap(buf, &map);
         gst_sample_unref(sample);
 
-        // Marshal onto the thread that owns the QVideoSink (GUI thread).
-        QPointer<QVideoSink>     sinkPtr  = self->sink;
-        QPointer<VideoPipeline>  ownerPtr = self->owner;
+        // Coalesce delivery onto the GUI thread (see FrameMailbox): stash the
+        // freshest frame and keep at most one paint in flight, so a slow
+        // render thread can't back decoded frames up in the Qt event loop.
+        auto mailbox = self->mailbox;
+        {
+            std::lock_guard<std::mutex> lk(mailbox->mutex);
+            mailbox->latest = frame;
+        }
         const bool wasFirst = !self->firstFrameEmitted.exchange(true);
-
-        QMetaObject::invokeMethod(sinkPtr,
-            [sinkPtr, ownerPtr, frame, wasFirst]() mutable {
-                if (!sinkPtr) return;
-                sinkPtr->setVideoFrame(frame);
-                if (wasFirst && ownerPtr) emit ownerPtr->firstFrameRendered();
-            },
-            Qt::QueuedConnection);
+        if (mailbox->pending.exchange(true)) {
+            // A paint is already queued; this frame supersedes the previous
+            // undelivered one (GUI thread behind) — count it as coalesced.
+            mailbox->coalesced.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            QPointer<QVideoSink>     sinkPtr  = self->sink;
+            QPointer<VideoPipeline>  ownerPtr = self->owner;
+            QMetaObject::invokeMethod(sinkPtr,
+                [mailbox, sinkPtr, ownerPtr, wasFirst]() mutable {
+                    // Clear before snapshotting so a frame arriving mid-paint
+                    // schedules the next delivery rather than being stranded.
+                    mailbox->pending.store(false);
+                    QVideoFrame f;
+                    {
+                        std::lock_guard<std::mutex> lk(mailbox->mutex);
+                        f = mailbox->latest;
+                    }
+                    if (!sinkPtr) return;
+                    sinkPtr->setVideoFrame(f);
+                    mailbox->delivered.fetch_add(1, std::memory_order_relaxed);
+                    if (wasFirst && ownerPtr) emit ownerPtr->firstFrameRendered();
+                },
+                Qt::QueuedConnection);
+        }
 
         return GST_FLOW_OK;
     }
@@ -397,6 +450,16 @@ QString VideoPipeline::start() {
     g_object_set(webrtcbin,
         "bundle-policy", GST_WEBRTC_BUNDLE_POLICY_MAX_BUNDLE, nullptr);
 
+    // Jitterbuffer dwell time. webrtcbin defaults to 200 ms — sensible for
+    // lossy internet paths, but pure added glass-to-glass latency on the LAN
+    // a PiKVM lives on. Configurable via video.webrtc_latency_ms; lower trims
+    // lag at the cost of tolerance for packet jitter/reordering.
+    {
+        const int lat = std::max(0, m_jitterLatencyMs);
+        g_object_set(webrtcbin, "latency", static_cast<guint>(lat), nullptr);
+        qCInfo(lcVideo) << "webrtcbin jitterbuffer latency:" << lat << "ms";
+    }
+
     gst_bin_add(GST_BIN(pipeline), webrtcbin);
 
     auto impl = std::make_unique<Impl>();
@@ -451,6 +514,14 @@ QString VideoPipeline::start() {
 
 void VideoPipeline::stop() {
     m_impl.reset();
+}
+
+quint64 VideoPipeline::framesDelivered() const {
+    return m_impl ? m_impl->mailbox->delivered.load(std::memory_order_relaxed) : 0;
+}
+
+quint64 VideoPipeline::framesCoalesced() const {
+    return m_impl ? m_impl->mailbox->coalesced.load(std::memory_order_relaxed) : 0;
 }
 
 void VideoPipeline::handleRemoteOffer(const QString& offerSdp) {

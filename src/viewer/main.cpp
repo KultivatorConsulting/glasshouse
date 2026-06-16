@@ -27,6 +27,7 @@
 #include <QTextStream>
 #include <QTimer>
 
+#include <memory>
 #include <optional>
 
 using namespace glasshouse;
@@ -109,6 +110,10 @@ struct Instance {
     MjpegPipeline*   mjpeg     = nullptr;
 
     QElapsedTimer*   wallClock = nullptr;
+
+    // Last delivered-frame count sampled by the stats poll timer, used to
+    // derive effective render FPS from the per-second delta.
+    quint64          lastDelivered = 0;
 
     // Set when an error has scheduled a re-auth + rebuild via QTimer;
     // cleared in the authenticated handler once the rebuild has run.
@@ -280,6 +285,9 @@ int main(int argc, char** argv) {
                                        releaseHotkey, fullscreenHotkey,
                                        specialKeysHotkey);
         inst.window->setPersistenceHost(inst.host);
+        inst.window->setCursorMarker(cfg.video.cursor_marker,
+                                     cfg.video.cursor_marker_color,
+                                     cfg.video.cursor_marker_size);
 
         // Geometry precedence: explicit YAML override > last saved
         // QSettings slot > Qt's default 1280x720 (constructor).
@@ -295,6 +303,7 @@ int main(int argc, char** argv) {
 
         if (inst.transport == VideoTransport::Janus) {
             inst.webrtc = new VideoPipeline(inst.window->videoSink(), &app);
+            inst.webrtc->setJitterLatencyMs(cfg.video.webrtc_latency_ms);
             // Loud warning at WARN level so it shows up in default
             // launches (no QT_LOGGING_RULES needed). The leak is well
             // outside our pipeline boundary; see DESIGN.md §10.5.
@@ -563,6 +572,46 @@ int main(int argc, char** argv) {
         QList<QPointer<VideoWindow>> all;
         for (auto& inst : instances) all.append(QPointer<VideoWindow>(inst.window));
         for (auto& inst : instances) inst.window->setSiblings(all);
+    }
+
+    // ------------------------------------------------------------------
+    // Steady-state video telemetry (DESIGN §10.2). Poll each pipeline's
+    // delivered / coalesced frame counters once a second; show effective
+    // render FPS + the GUI-thread coalesced-drop count in the status bar,
+    // and log at debug. This surfaces throughput and frame-shedding — the
+    // behaviour the buffering fix bounds. True glass-to-glass latency still
+    // needs the manual clock-on-screen procedure documented in §10.2.
+    // ------------------------------------------------------------------
+    {
+        auto statsClock = std::make_shared<QElapsedTimer>();
+        statsClock->start();
+        auto* statsTimer = new QTimer(&app);
+        statsTimer->setInterval(1000);
+        QObject::connect(statsTimer, &QTimer::timeout, &app,
+            [&instances, statsClock]() {
+                const double secs = statsClock->restart() / 1000.0;
+                for (auto& inst : instances) {
+                    const bool janus = (inst.transport == VideoTransport::Janus);
+                    const quint64 delivered = janus
+                        ? (inst.webrtc ? inst.webrtc->framesDelivered() : 0)
+                        : (inst.mjpeg  ? inst.mjpeg->framesDelivered()  : 0);
+                    const quint64 coalesced = janus
+                        ? (inst.webrtc ? inst.webrtc->framesCoalesced() : 0)
+                        : (inst.mjpeg  ? inst.mjpeg->framesCoalesced()  : 0);
+                    quint64 base = inst.lastDelivered;
+                    if (delivered < base) base = 0;  // pipeline rebuilt (reconnect)
+                    const double fps = secs > 0.0
+                        ? double(delivered - base) / secs : 0.0;
+                    inst.lastDelivered = delivered;
+                    inst.window->setVideoStats(
+                        QStringLiteral("%1 fps · %2 coalesced")
+                            .arg(fps, 0, 'f', 1).arg(coalesced));
+                    qCDebug(lcVideo).nospace()
+                        << inst.host << " video: " << fps
+                        << " fps, coalesced=" << coalesced;
+                }
+            });
+        statsTimer->start();
     }
 
     // ------------------------------------------------------------------

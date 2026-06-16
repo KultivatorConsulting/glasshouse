@@ -18,19 +18,23 @@ namespace glasshouse {
 //                 cookies=["auth_token=…"]
 //        ! multipartdemux
 //        ! image/jpeg
-//        ! jpegparse ! videorate max-rate=<maxFps>   (only when maxFps>0)
+//        ! queue leaky=downstream max-size-buffers=1     (stale-frame dropper)
 //        ! jpegdec
 //        ! videoconvert
 //        ! video/x-raw,format=BGRA
 //        ! appsink            (→ QVideoFrame → QVideoSink)
 //
-// Frame-rate cap: ustreamer pushes JPEG at the HDMI capture rate (with
-// drop-same-frames suppressing static frames). A `videorate max-rate=N`
-// placed *before* jpegdec drops surplus frames while they are still
-// encoded, so the cap cuts software decode **and** colour-convert **and**
-// the main-thread render together — KVM/console work doesn't need 60fps.
-// `max-rate` implies drop-only, so motion is paced and a static screen
-// costs nothing. `maxFps <= 0` disables the cap (decode every frame).
+// Latency + CPU control, both *before* jpegdec: a leaky-downstream `queue`
+// is the deterministic stale-frame dropper — MJPEG is all-intra so dropping
+// a whole JPEG is safe, and keeping only the freshest buffers stops a slow
+// decode/render from backing frames up in souphttpsrc + the kernel socket
+// (the real source of >1 s MJPEG lag; ustreamer only ever holds the latest
+// frame, so any backlog is client-side). Keeping only the single freshest
+// buffer (max-size-buffers=1) keeps that backlog to a minimum. The former
+// `jpegparse ! videorate max-rate=N` cap was removed — on ustreamer's
+// untimestamped output videorate never capped (GStreamer #720104), only
+// added latency, and froze the stream with drop-only=true. `maxFps` is now
+// informational only.
 //
 // Why software jpegdec and not a HW decoder: ustreamer emits 4:2:2
 // (`2x1,1x1,1x1`) baseline JPEG, which NVIDIA's `nvjpegdec` rejects with
@@ -64,6 +68,12 @@ public:
     // Decoder + active cap, for the status bar (e.g. "jpegdec" or
     // "jpegdec ≤30fps"). Reports "jpegdec" until start().
     QString activeDecoder() const { return m_activeDecoder; }
+
+    // Steady-state telemetry (DESIGN §10.2): frames painted to the sink, and
+    // frames coalesced away because the GUI thread was behind. Poll on a
+    // timer to derive effective render FPS. Both zero before start().
+    quint64 framesDelivered() const;
+    quint64 framesCoalesced() const;
 
 signals:
     void firstFrameRendered();

@@ -15,7 +15,8 @@ namespace glasshouse {
 // Pipeline shape:
 //     webrtcbin name=webrtc bundle-policy=max-bundle
 //        — on pad-added (fires once DTLS/SRTP is up) —
-//        queue ! rtph264depay ! h264parse config-interval=-1
+//        queue (bounded, non-leaky) ! rtph264depay
+//              ! h264parse config-interval=-1
 //              ! <decoder>   (nvh264dec | vah264dec | avdec_h264)
 //              ! videoconvert
 //              ! video/x-raw,format=BGRA
@@ -41,6 +42,17 @@ public:
 
     QString activeDecoder() const { return m_activeDecoder; }
 
+    // webrtcbin jitterbuffer dwell time (ms). Set before start(); applied to
+    // the bin as it goes to PLAYING. Lower = less glass-to-glass latency,
+    // less jitter tolerance. Default 100 (LAN-tuned; webrtcbin's own is 200).
+    void setJitterLatencyMs(int ms) { m_jitterLatencyMs = ms; }
+
+    // Steady-state telemetry (DESIGN §10.2): frames painted to the sink, and
+    // frames coalesced away because the GUI thread was behind. Poll on a
+    // timer to derive effective render FPS. Both zero before start().
+    quint64 framesDelivered() const;
+    quint64 framesCoalesced() const;
+
 public slots:
     // Feed the SDP offer received from Janus. Internally runs
     // set-remote-description → create-answer → set-local-description.
@@ -60,6 +72,7 @@ private:
     std::unique_ptr<Impl>  m_impl;
     QString                m_activeDecoder;
     QVideoSink*            m_sink;  // not owned
+    int                    m_jitterLatencyMs = 100;
 };
 
 }  // namespace glasshouse

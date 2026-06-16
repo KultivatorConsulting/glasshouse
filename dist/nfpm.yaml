@@ -45,6 +45,9 @@ depends:
   - gstreamer1.0-nice               # nicesrc/nicesink — webrtcbin's ICE
   - gstreamer1.0-libav              # avdec_h264 software fallback
   - libnice10
+  # X11 + XFixes for capture-time pointer-barrier confinement.
+  - libx11-6
+  - libxfixes3
 
 contents:
   - src: ./build/bin/glasshouse-viewer

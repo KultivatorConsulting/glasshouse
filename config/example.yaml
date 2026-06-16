@@ -37,11 +37,21 @@ release_hotkey: "Ctrl+Alt+Shift+Backspace"
 
 video:
   prefer_hw_decode: true
-  # Client-side MJPEG frame-rate cap, applied via a pre-decode videorate.
-  # KVM/console work doesn't need 60fps; a lower cap cuts software decode +
-  # colour-convert + render CPU roughly in proportion. 0 = uncapped.
-  # (No effect on the Janus/WebRTC path.)
+  # NOTE: target_fps is currently NOT enforced on the MJPEG path. The
+  # client-side videorate cap was a no-op on ustreamer's untimestamped stream
+  # (it only added latency) and was removed; frames are governed by the leaky
+  # queue instead. Kept for forward-compat; has no effect today.
   target_fps: 30
+  # Janus/H.264 jitterbuffer dwell (ms). webrtcbin's default is 200, tuned
+  # for lossy internet; on the LAN a PiKVM lives on that's pure added lag.
+  # Lower = less video latency, less tolerance for jitter/loss. 50–100 suits
+  # a wired LAN; raise toward 200 on flaky Wi-Fi. (Janus transport only.)
+  webrtc_latency_ms: 100
+  # Capture cursor marker: a zero-lag local pointer drawn while captured that
+  # the (laggy) guest cursor converges to. style: ring | crosshair | hidden.
+  cursor_marker: ring
+  cursor_marker_color: "#FFA000"
+  cursor_marker_size: 24
 
 windows:
   - target_monitor: 1

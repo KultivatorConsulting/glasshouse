@@ -2,7 +2,9 @@
 
 #include "coord_transform.h"
 #include "pikvmevents.h"
+#include "pointerconfiner.h"
 
+#include <QCursor>
 #include <QKeySequence>
 #include <QList>
 #include <QMainWindow>
@@ -25,11 +27,13 @@ namespace glasshouse {
 //   wire-name keys; see DESIGN.md §5.2 and §10.1 for the math and the
 //   empirical verification of its numeric behaviour.
 //
-// True compositor-level pointer locking (Wayland pointer-constraints) is
-// deferred; current Phase 3 implementation uses `QWidget::grabMouse()` and
-// an app-wide `Qt::BlankCursor` override. The local cursor therefore
-// "leaves" the window invisibly if the target cursor runs off-edge — the
-// release hotkey always recovers.
+// While captured, the pointer is confined to the bounding rectangle of the
+// session windows using X11 XFixes pointer barriers (PointerConfiner):
+// server-side, no grab and no cursor warping, so it cannot stall the event
+// loop the way QCursor::setPos did. `grabMouse` still routes events to the
+// holder even past a window edge; `grabKeyboard` pins key input; the release
+// hotkey always recovers. (Barriers are X11-only; on Wayland confinement is
+// a no-op and would need the compositor pointer-constraints protocol.)
 class VideoWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -69,10 +73,19 @@ public:
     // per PiKVM host so multiple windows don't trample each other).
     void setPersistenceHost(const QString& host) { m_persistHost = host; }
 
+    // Capture cursor marker: a local, zero-lag pointer drawn during capture
+    // that the guest cursor converges to. style = "ring" | "crosshair" |
+    // "hidden"; color = "#RRGGBB"; size = ring outer diameter (px).
+    void setCursorMarker(const QString& style, const QString& color, int size);
+
 public slots:
     void setConnectionStatus(const QString& text);
     void setDecoderLabel(const QString& decoder);
     void setLatencyLabel(const QString& latency);
+    // Live steady-state readout (effective render FPS + GUI-thread coalesced
+    // drops), updated on a poll timer by main.cpp. Distinct from the latency
+    // label, which holds the one-shot auth-to-first-frame time.
+    void setVideoStats(const QString& stats);
 
     // Public so the multi-window single-capture enforcement in main.cpp
     // can release this window's capture when a sibling claims one.
@@ -113,6 +126,7 @@ protected:
 private:
     void startCapture();
     void flushMousePending();
+    void stepPulse();          // advances the click-pulse cursor animation
     void buildMenuBar();
 
     // Pick the right CoordTransform for a cursor at globalPos: if the
@@ -123,6 +137,10 @@ private:
     // session, just routed through whichever window's transform fits.
     ApiCoord apiCoordForCursor(const QPoint& globalPos) const;
 
+    // frameGeometry() of every session window (self + siblings) in global
+    // coords — the region the pointer is confined to during capture.
+    QList<QRect> sessionWindowRects() const;
+
     bool handleMouseMove(QMouseEvent* ev);
     bool handleMouseButton(QMouseEvent* ev, bool pressed);
     bool handleWheel(class QWheelEvent* ev);
@@ -132,6 +150,7 @@ private:
     QLabel*       m_statusLabel   = nullptr;
     QLabel*       m_decoderLabel  = nullptr;
     QLabel*       m_latencyLabel  = nullptr;
+    QLabel*       m_statsLabel    = nullptr;
 
     QString       m_persistHost;
     QRect         m_targetMonitor;
@@ -142,6 +161,16 @@ private:
     int           m_specialKeysHotkey  = 0;
 
     bool          m_captured         = false;
+
+    // Confines the pointer to the session windows while captured (X11).
+    PointerConfiner m_confiner;
+
+    // Capture cursor marker + click-pulse animation (see setCursorMarker).
+    QString        m_markerStyle = QStringLiteral("ring");
+    QCursor        m_markerCursor;          // base marker shown during capture
+    QList<QCursor> m_pulseCursors;          // click-pulse animation frames
+    class QTimer*  m_pulseTimer  = nullptr;
+    int            m_pulseStep   = 0;
 
     // Other VideoWindows in this session. QPointer because windows can
     // be closed independently; iteration tolerates a stale entry.

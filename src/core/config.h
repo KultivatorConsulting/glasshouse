@@ -39,6 +39,17 @@ struct AuthSpec {
 struct VideoSpec {
     bool prefer_hw_decode = true;
     int  target_fps = 60;
+    // webrtcbin jitterbuffer dwell (ms) for the Janus/H.264 path. Lower =
+    // less glass-to-glass latency, less jitter tolerance. 100 suits the LAN
+    // a PiKVM lives on (webrtcbin's own default is 200). No effect on MJPEG.
+    int  webrtc_latency_ms = 100;
+    // Capture cursor marker — a local, zero-lag pointer drawn while captured
+    // that the guest cursor converges to (PiKVM absolute mode). style =
+    // "ring" | "crosshair" | "hidden"; color = "#RRGGBB"; size = ring outer
+    // diameter (px).
+    QString cursor_marker       = QStringLiteral("ring");
+    QString cursor_marker_color = QStringLiteral("#FFA000");
+    int     cursor_marker_size  = 24;
 };
 
 // Custom chord entry for the special-keys palette / future macro-pad

@@ -198,8 +198,14 @@ ConfigResult loadConfig(const QString& path) {
 
     // video
     if (const auto v = root["video"]; v) {
-        cfg.video.prefer_hw_decode = yamlScalarOr<bool>(v, "prefer_hw_decode", true);
-        cfg.video.target_fps       = yamlScalarOr<int> (v, "target_fps",       60);
+        cfg.video.prefer_hw_decode  = yamlScalarOr<bool>(v, "prefer_hw_decode",  true);
+        cfg.video.target_fps        = yamlScalarOr<int> (v, "target_fps",        60);
+        cfg.video.webrtc_latency_ms = yamlScalarOr<int> (v, "webrtc_latency_ms", 100);
+        cfg.video.cursor_marker       = QString::fromStdString(
+            yamlScalarOr<std::string>(v, "cursor_marker",       "ring"));
+        cfg.video.cursor_marker_color = QString::fromStdString(
+            yamlScalarOr<std::string>(v, "cursor_marker_color", "#FFA000"));
+        cfg.video.cursor_marker_size  = yamlScalarOr<int>(v, "cursor_marker_size", 24);
     }
 
     // windows
