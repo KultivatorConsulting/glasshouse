@@ -51,7 +51,9 @@ jobs:
             gstreamer1.0-plugins-bad \
             gstreamer1.0-nice \
             gstreamer1.0-libav \
-            libnice-dev
+            libnice-dev \
+            libx11-dev \
+            libxfixes-dev
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
