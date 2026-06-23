@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-second video telemetry, and per-event HID drops during a reconnect —
   no longer floods syslog/journald. Re-enable for troubleshooting with
   `QT_LOGGING_RULES='glasshouse.*.debug=true'` (or per-category, e.g.
-  `glasshouse.ws.debug=true`).
+  `glasshouse.ws.debug=true`). The viewer also accepts `--verbose`/`-v` to
+  enable debug logging without setting the env var.
 
 ### Fixed
 - **Cursor confinement during capture (X11).** While capture is held, the

@@ -198,9 +198,14 @@ int main(int argc, char** argv) {
         QStringLiteral("Append all log messages to FILE in addition to stderr. "
                        "No rotation; pair with logrotate(8) for long sessions."),
         QStringLiteral("path"));
+    QCommandLineOption verboseOpt(
+        {QStringLiteral("v"), QStringLiteral("verbose")},
+        QStringLiteral("Enable debug logging for all glasshouse.* categories "
+                       "(same as QT_LOGGING_RULES='glasshouse.*.debug=true')."));
     parser.addOption(configOpt);
     parser.addOption(onlyOpt);
     parser.addOption(logFileOpt);
+    parser.addOption(verboseOpt);
     parser.process(app);
 
     // Wire file logging early so config-load failures land in the file too.
@@ -216,6 +221,13 @@ int main(int argc, char** argv) {
             delete g_logFile;
             g_logFile = nullptr;
         }
+    }
+
+    // --verbose: enable debug for our categories without needing the env var.
+    // (Categories default to Info — see logging.cpp.) An explicit
+    // QT_LOGGING_RULES still layers on top for finer per-category control.
+    if (parser.isSet(verboseOpt)) {
+        QLoggingCategory::setFilterRules(QStringLiteral("glasshouse.*.debug=true"));
     }
 
     const auto result = loadConfig(parser.value(configOpt));
