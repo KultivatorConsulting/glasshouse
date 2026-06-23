@@ -318,7 +318,10 @@ void PiKvmClient::attemptReconnect() {
 
 void PiKvmClient::sendWsJson(const QString& type, const QJsonObject& event) {
     if (!isConnected()) {
-        qCWarning(lcHid) << m_opts.host << "drop" << type << "— WS not connected";
+        // Debug, not warning: a WS outage drops every coalesced mouse-move
+        // (~120/s) and key here — the disconnect itself is already logged
+        // once via onWsDisconnected, so per-event drops would just flood.
+        qCDebug(lcHid) << m_opts.host << "drop" << type << "— WS not connected";
         return;
     }
     QJsonObject frame;

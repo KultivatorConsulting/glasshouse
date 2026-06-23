@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Quieter logging.** Categories now default to Info level, so the
+  high-frequency debug output — per-frame WebSocket state dumps, the
+  per-second video telemetry, and per-event HID drops during a reconnect —
+  no longer floods syslog/journald. Re-enable for troubleshooting with
+  `QT_LOGGING_RULES='glasshouse.*.debug=true'` (or per-category, e.g.
+  `glasshouse.ws.debug=true`).
+
 ### Fixed
 - **Cursor confinement during capture (X11).** While capture is held, the
   pointer is now penned inside the bounding rectangle of the session windows

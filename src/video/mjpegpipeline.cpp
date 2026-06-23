@@ -186,7 +186,7 @@ QString MjpegPipeline::start(const QString& host,
         << host << " starting MJPEG pipeline: jpegdec, frames governed by the"
         << " leaky queue (videorate cap removed)";
     if (maxFps > 0) {
-        qCInfo(lcVideo).nospace() << host << " note: video.target_fps="
+        qCDebug(lcVideo).nospace() << host << " note: video.target_fps="
             << maxFps << " is not enforced on MJPEG (videorate was a no-op on"
             << " the untimestamped stream — see DESIGN §10.6)";
     }
