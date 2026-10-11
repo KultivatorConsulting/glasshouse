@@ -38,6 +38,13 @@ QRect computeLetterbox(const QSize& widgetSize, const QSize& videoSize) {
     return QRect(rx, ry, rw, rh);
 }
 
+ApiCoord desktopPixelToApi(const QPointF& desktopPx,
+                           const QSize& logicalDesktop) {
+    const int dw = std::max(1, logicalDesktop.width());
+    const int dh = std::max(1, logicalDesktop.height());
+    return { toApi(desktopPx.x() / dw), toApi(desktopPx.y() / dh) };
+}
+
 ApiCoord transformToApi(const CoordTransformInput& in) {
     // 1. cursor relative to window origin
     const int wx = in.localCursor.x() - in.windowRect.x();
@@ -58,9 +65,7 @@ ApiCoord transformToApi(const CoordTransformInput& in) {
     const double ty_px = in.monitorRect.y() + ny * in.monitorRect.height();
 
     // 5+6. to API s16 coords, clamped
-    const int dw = std::max(1, in.logicalDesktop.width());
-    const int dh = std::max(1, in.logicalDesktop.height());
-    return { toApi(tx_px / dw), toApi(ty_px / dh) };
+    return desktopPixelToApi(QPointF(tx_px, ty_px), in.logicalDesktop);
 }
 
 }  // namespace glasshouse

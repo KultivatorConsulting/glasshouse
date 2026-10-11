@@ -74,6 +74,20 @@ struct OcrSpec {
         "Transcribe every piece of text visible in this image exactly as it appears, preserving reading order and line breaks. Output only the transcribed text: no commentary, no headings, no code fences. If the image contains no text, output nothing.");
 };
 
+// Local MCP server (DESIGN.md §10.11): exposes the running session — screen
+// indexes, the combined desktop, HID-master routing — to any MCP client.
+//
+// Off by default and loopback-only when on. This is a remote-control
+// surface for the target machine: anything that can reach it can type on
+// and click the target, so it is opt-in and it does not listen beyond the
+// host without being told to. Set `token` to require a bearer header.
+struct McpSpec {
+    bool    enabled = false;
+    QString bind    = QStringLiteral("127.0.0.1");
+    int     port    = 8765;
+    QString token;   // optional; secret:// ref resolved like a password
+};
+
 // Custom chord entry for the special-keys palette / future macro-pad
 // daemon. `keys` is a list of MDN KeyboardEvent.code names (the same
 // `web_name` strings PiKVM's send_shortcut endpoint expects).
@@ -95,6 +109,7 @@ struct Config {
     QList<ShortcutSpec>    shortcuts;       // optional, populates the palette
     VideoSpec              video;
     OcrSpec                ocr;
+    McpSpec                mcp;
     QList<WindowSpec>      windows;
 };
 

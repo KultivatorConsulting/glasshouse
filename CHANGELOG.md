@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A local MCP server, off by default** (`mcp.enabled`). Exposes the
+  running session to any MCP client: `glasshouse_session` (screen indexes,
+  each head's rectangle within the combined desktop, which PiKVM carries
+  HID), `glasshouse_screenshot`, `glasshouse_type`, `glasshouse_keys`,
+  `glasshouse_mouse_move`, `glasshouse_mouse_click` and
+  `glasshouse_mouse_scroll`. It runs inside the viewer because the tools
+  need the video sinks and the session view, neither of which exists
+  elsewhere — see DESIGN.md §10.11.
+
+  Mouse coordinates need no calibration step: the monitor layout is
+  configured and verified against the streamer, so a desktop pixel maps
+  straight to absolute HID coordinates. `glasshouse_mouse_move` takes
+  `settle_ms` for callers that capture straight after moving, since the
+  target still has to draw the cursor and the frame still has to travel.
+
+  Loopback-only when enabled, with an optional `mcp.token` bearer token
+  resolved as a `secret://` ref — a token that cannot be resolved stops
+  the server rather than silently leaving the port open. Every tool call
+  flashes on the status bar, because something else driving the keyboard
+  should not be silent.
+- **`glasshouse-mcpprobe`.** Serves a synthetic two-head session with no
+  PiKVMs attached, for exercising the MCP tool surface without hardware.
 - **`--version`.** Prints the compiled version string and exits. Long
   form only: `-v` is already `--verbose`. Added because "is the installed
   package the code I am looking at" had no quick answer.

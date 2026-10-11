@@ -56,6 +56,9 @@ private slots:
     void letterboxTallerWidgetGetsHorizontalBars();
     void letterboxWiderWidgetGetsVerticalBars();
     void letterboxFallsBackToWidgetWhenVideoSizeUnknown();
+    void desktopPixelMatchesCursorPathAtSamePoint();
+    void desktopPixelHitsKnownEndpoints();
+    void desktopPixelClampsOutsideDesktop();
     void letterboxIsCenteredInsideWidget();
 };
 
@@ -200,6 +203,59 @@ void TestCoordTransform::letterboxIsCenteredInsideWidget() {
     // dimension's pad is odd.
     QVERIFY(qAbs(leftPad - rightPad) <= 1);
     QVERIFY(qAbs(topPad  - botPad)   <= 1);
+}
+
+// desktopPixelToApi is the entry point the MCP server uses: it is handed a
+// desktop pixel directly, with no cursor or window in the picture. It must
+// agree exactly with the cursor path, or a tool-driven click lands somewhere
+// other than where the same coordinate would land by hand.
+void TestCoordTransform::desktopPixelMatchesCursorPathAtSamePoint() {
+    struct Case { const char* name; QRect monitor; int lx; int ly; };
+    const Case cases[] = {
+        { "monitor 1 centre",     kMonitor1,  960, 540 },
+        { "monitor 1 origin",     kMonitor1,    0,   0 },
+        { "monitor 2 centre",     kMonitor2,  960, 540 },
+        { "monitor 2 far corner", kMonitor2, 1920, 1080 },
+        { "quarter across",       kMonitor1,  480, 270 },
+    };
+    for (const auto& c : cases) {
+        const ApiCoord viaCursor = transformToApi(oneToOne(c.monitor, c.lx, c.ly));
+        const ApiCoord viaPixel  = desktopPixelToApi(
+            QPointF(c.monitor.x() + c.lx, c.monitor.y() + c.ly), kDesktop);
+        QVERIFY2(viaCursor.x == viaPixel.x && viaCursor.y == viaPixel.y,
+                 qPrintable(QStringLiteral("%1: cursor path (%2,%3) != pixel "
+                                           "path (%4,%5)")
+                                .arg(c.name)
+                                .arg(viaCursor.x).arg(viaCursor.y)
+                                .arg(viaPixel.x).arg(viaPixel.y)));
+    }
+}
+
+void TestCoordTransform::desktopPixelHitsKnownEndpoints() {
+    // Same golden values as the cursor-path tests: centre of the combined
+    // desktop is (0,0), the far corner saturates.
+    const ApiCoord centre = desktopPixelToApi(QPointF(1920, 540), kDesktop);
+    QCOMPARE(centre.x, 0);
+    QCOMPARE(centre.y, 0);
+
+    const ApiCoord origin = desktopPixelToApi(QPointF(0, 0), kDesktop);
+    QCOMPARE(origin.x, -32768);
+    QCOMPARE(origin.y, -32768);
+
+    const ApiCoord far = desktopPixelToApi(QPointF(3840, 1080), kDesktop);
+    QCOMPARE(far.x, 32767);
+    QCOMPARE(far.y, 32767);
+}
+
+void TestCoordTransform::desktopPixelClampsOutsideDesktop() {
+    // A tool can be handed nonsense; it must saturate rather than wrap.
+    const ApiCoord under = desktopPixelToApi(QPointF(-500, -500), kDesktop);
+    QCOMPARE(under.x, -32768);
+    QCOMPARE(under.y, -32768);
+
+    const ApiCoord over = desktopPixelToApi(QPointF(99999, 99999), kDesktop);
+    QCOMPARE(over.x, 32767);
+    QCOMPARE(over.y, 32767);
 }
 
 QTEST_APPLESS_MAIN(TestCoordTransform)

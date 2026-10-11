@@ -5,6 +5,7 @@ target_link_libraries(glasshouse-viewer
         glasshouse_core
         glasshouse_input
         glasshouse_video
+        glasshouse_mcp
         Qt6::Widgets
 )
 

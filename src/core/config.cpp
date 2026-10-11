@@ -228,6 +228,16 @@ ConfigResult loadConfig(const QString& path) {
             o, "prompt", d.prompt.toStdString()));
     }
 
+    // mcp — all optional; absent block leaves the server disabled.
+    if (const auto m = root["mcp"]; m) {
+        const McpSpec d;
+        cfg.mcp.enabled = yamlScalarOr<bool>(m, "enabled", d.enabled);
+        cfg.mcp.bind    = QString::fromStdString(yamlScalarOr<std::string>(
+            m, "bind", d.bind.toStdString()));
+        cfg.mcp.port    = yamlScalarOr<int>(m, "port", d.port);
+        cfg.mcp.token   = yamlString(m, "token");
+    }
+
     // windows
     if (const auto ws = root["windows"]; ws) {
         for (const auto& n : ws) {

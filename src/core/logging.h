@@ -10,3 +10,5 @@ Q_DECLARE_LOGGING_CATEGORY(lcVideo)
 Q_DECLARE_LOGGING_CATEGORY(lcJanus)
 // Region capture → Tui text extraction.
 Q_DECLARE_LOGGING_CATEGORY(lcOcr)
+// Local MCP server: HTTP transport, tool dispatch, rejected auth.
+Q_DECLARE_LOGGING_CATEGORY(lcMcp)

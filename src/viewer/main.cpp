@@ -7,6 +7,7 @@
 #include "janusclient.h"
 #include "keymap.h"
 #include "logging.h"
+#include "mcpserver.h"
 #include "mjpegpipeline.h"
 #include "msddialog.h"
 #include "pikvmclient.h"
@@ -920,12 +921,94 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------------------------------
+    // Local MCP server (DESIGN.md §10.11). Off unless asked for: it lets any
+    // process that can reach the port type on and click the target.
+    //
+    // It lives in-process because it has to. Detection and frame access
+    // need the video sinks, and the session view — which screen is where,
+    // which host carries HID — only exists here. A separate process would
+    // have to re-authenticate every PiKVM and would still not know the
+    // monitors are adjacent. See HARNESS.md §9.
+    // ------------------------------------------------------------------
+    McpServer* mcp = nullptr;
+    if (cfg.mcp.enabled) {
+        // A token that was configured but cannot be resolved must not
+        // silently downgrade to an open port — that is the one mistake
+        // here with real consequences.
+        bool    haveToken = true;
+        QString token;
+        if (!cfg.mcp.token.isEmpty()) {
+            if (const auto t = SecretResolver::resolve(cfg.mcp.token)) {
+                token = *t;
+            } else {
+                qCWarning(lcMcp) << "mcp.token could not be resolved:"
+                                 << cfg.mcp.token
+                                 << "- not starting the server rather than "
+                                    "listening without authentication";
+                haveToken = false;
+            }
+        }
+        if (haveToken) {
+            mcp = new McpServer(&app);
+
+            McpSessionView view;
+            view.logicalDesktop = cfg.logical_desktop;
+            view.hid            = master->pk;
+            view.hidHost        = master->host;
+            // Config monitor id, reported alongside the 0-based screen
+            // index so a caller can cross-reference config.yaml.
+            const auto monitorIdForHost = [&cfg](const QString& host) {
+                for (const auto& m : cfg.monitors) {
+                    if (m.pikvm == host) return m.id;
+                }
+                return -1;
+            };
+            int idx = 0;
+            for (auto& inst : instances) {
+                McpScreen sc;
+                sc.index       = idx++;
+                sc.monitorId   = monitorIdForHost(inst.host);
+                sc.host        = inst.host;
+                sc.monitorRect = inst.monitorRect;
+                sc.window      = inst.window;
+                sc.client      = inst.pk;
+                sc.hidMaster   = (inst.host == master->host);
+                view.screens.append(sc);
+            }
+            mcp->setSession(view);
+
+            // Surface tool activity on every window: something else driving
+            // the keyboard should be visible, not silent.
+            QObject::connect(mcp, &McpServer::toolActivity, &app,
+                             [&instances](const QString& summary) {
+                for (auto& inst : instances) {
+                    inst.window->flashStatus(summary, 3000);
+                }
+            });
+
+            QString err;
+            if (mcp->start(cfg.mcp.bind,
+                           static_cast<quint16>(cfg.mcp.port), token, &err)) {
+                qCInfo(lcMcp).nospace()
+                    << "MCP: add with `claude mcp add --transport http "
+                    << "glasshouse http://" << cfg.mcp.bind << ':'
+                    << cfg.mcp.port << "/mcp`";
+            } else {
+                qCWarning(lcMcp) << "MCP server failed to listen on"
+                                 << cfg.mcp.bind << cfg.mcp.port << ':' << err;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Show all windows, kick off auth on every PiKVM.
     // ------------------------------------------------------------------
     for (auto& inst : instances) inst.window->show();
     for (auto& inst : instances) inst.pk->start();
 
     const int rc = app.exec();
+
+    if (mcp) mcp->stop();
 
     // Orderly teardown: close Janus first (sends WS close), then stop
     // pipelines, then stop PiKvmClients. Anything still alive is freed

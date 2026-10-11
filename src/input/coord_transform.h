@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPoint>
+#include <QPointF>
 #include <QRect>
 #include <QSize>
 
@@ -31,6 +32,18 @@ struct ApiCoord {
 };
 
 ApiCoord transformToApi(const CoordTransformInput& in);
+
+// Steps 4-6 only: an absolute target-desktop pixel straight to PiKVM s16
+// API coords. For callers that already know where on the desktop they want
+// the pointer and have no cursor, window or letterbox to derive it from —
+// the MCP server (DESIGN.md §12) is the one that does.
+//
+// Deliberately NOT a calibration-based mapping. The PiKVM MCP server has
+// to calibrate by visual cursor detection because it cannot know the
+// geometry; Glasshouse is configured with the monitor layout and verifies
+// it against the streamer (§10.8), so the proportional mapping is exact
+// and a measured correction factor would only add error.
+ApiCoord desktopPixelToApi(const QPointF& desktopPx, const QSize& logicalDesktop);
 
 // Given a video sink widget of `widgetSize` rendering a frame of
 // `videoSize` with `Qt::KeepAspectRatio`, return the rect *inside*

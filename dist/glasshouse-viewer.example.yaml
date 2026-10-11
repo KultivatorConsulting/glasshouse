@@ -92,6 +92,29 @@ video:
   cursor_marker_color: "#FFA000"
   cursor_marker_size: 24
 
+# Local MCP server (DESIGN.md §10.11). Exposes the running session to any
+# MCP client: screen indexes, the combined desktop, screenshots, typing,
+# key chords and pointer control.
+#
+# Off by default on purpose. This is a remote-control surface for the
+# target machine — anything that can reach the port can type on it and
+# click it — so turn it on deliberately and leave `bind` on loopback
+# unless you have a reason not to. Setting `token` requires callers to
+# send `Authorization: Bearer <value>`; it is a `secret://` reference
+# resolved exactly like a PiKVM password, and if it cannot be resolved the
+# server does not start rather than listening unauthenticated.
+#
+# Once running:
+#   claude mcp add --transport http glasshouse http://127.0.0.1:8765/mcp
+#
+# `glasshouse-mcpprobe` serves a synthetic two-head session on 18766 if
+# you want to look at the tool surface without any PiKVMs attached.
+mcp:
+  enabled: false
+  bind: "127.0.0.1"
+  port: 8765
+  # token: "secret://mcp_token"
+
 # One window per target monitor. `geometry` is optional — leave it out
 # and the window remembers its last position via QSettings (per-host).
 windows:

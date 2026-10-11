@@ -559,7 +559,7 @@ window shows a spinner with an elapsed-seconds count and puts a busy
 cursor under the pointer for the duration; pressing the hotkey again
 abandons the request. See §10.10.
 
-### Phase 10 — Kahu harness — proposed, unbuilt
+### Phase 10 — Kahu harness — started (MCP server built)
 An assistant that watches the target over the PiKVMs, judges what it
 sees against conversation context, and reports in a chat window the
 user opens when they want it — proposing rather than acting, with
@@ -568,6 +568,12 @@ the few events worth chasing the user over.
 
 Phases 8 and 9 turn out to be its primitives: `/api/hid/print` is the
 act path, and region capture is the observe path.
+
+**First increment is in** (§10.11): a local MCP server exposing the
+session, screenshots, typing, key chords and pointer control. That is the
+tier-2 consumer path from HARNESS.md §8.1 — point any MCP client at it and
+the surface is usable before the harness exists. Still unbuilt: the watcher
+engine (§5 and §5.4 of HARNESS.md) and everything behind it.
 
 **Only part of it belongs to this repository.** The watcher engine and
 the MCP server must live in the viewer — detection runs on every decoded
@@ -1114,6 +1120,91 @@ another request — after several seconds of waiting, pressing it again is
 impatience, not a new request. `TuiClient::cancel()` aborts the reply and
 still reports `finished`, so the spinner is torn down on exactly one path.
 
+### 10.11 Local MCP server (verified 2026-10-12)
+
+`mcp.enabled: true` starts an MCP server inside the viewer, exposing the
+session to any MCP client. This is the first increment of Phase 10 and the
+only part of the harness that belongs in this repository — see HARNESS.md
+§9 for the public/private split, and §8.1 for why a generic client comes
+before the Kahu harness rather than after it.
+
+**Why it is in-process.** The tools need the video sinks for frames and the
+session view — which head sits where on the combined desktop, which host
+carries HID — and neither exists outside the viewer. A separate server
+would have to re-authenticate every PiKVM and would still not know the
+monitors are adjacent, because no single PiKVM can know the others exist
+(§4). That is also the answer to "why not reuse the PiKVM MCP server":
+it speaks per-PiKVM pixels, so a client using it cannot reason about the
+desktop as a whole.
+
+**Transport: HTTP, POST only, no SSE.** `McpHttpServer` is a minimal
+HTTP/1.1 front end over `QTcpServer` — Qt has no HTTP server and pulling
+one in for one POST endpoint would be disproportionate. `GET` returns
+**405**, deliberately: HARNESS.md §9.1 settles on the client polling a
+tool rather than the server pushing, so there is no stream to open and
+leaving a GET hanging would make a client wait for push that never comes.
+No `Mcp-Session-Id` is issued; the spec permits a stateless server and
+every tool call here is self-contained. Chunked request bodies are
+rejected with 411 rather than mis-parsed.
+
+Responses are asynchronous. A tool that waits — a paste sequencing its
+chunks, a settle delay before a screenshot — holds its socket and answers
+when it completes, guarded by a `QPointer` so a client that disconnects
+mid-call drops the response instead of writing to a dead descriptor.
+
+**Verified 2026-10-12** against `curl` and against Claude Code itself
+(`claude mcp add --transport http`, which reported `✔ Connected`), plus 11
+assertions in `tests/test_mcpserver.cpp` covering protocol echo and
+fallback, the tool schemas, notification-gets-202, parse error, unknown
+method, unknown tool, the no-HID refusals, GET→405, and bearer-token
+enforcement. `glasshouse-mcpprobe` serves a synthetic two-head session so
+the surface can be exercised with no PiKVMs attached.
+
+**Mouse coordinates need no calibration, and that is the point.** The
+PiKVM MCP server calibrates by visual cursor detection: it moves a known
+delta, diffs two screenshots, finds the two cursor-sized clusters and
+medians the commanded/detected ratios. It has to, because it cannot know
+the geometry. Glasshouse is configured with the monitor layout and
+verifies it against the streamer (§10.8), so `desktopPixelToApi` maps a
+desktop pixel straight to s16 — steps 4–6 of §5.2 with no cursor, window
+or letterbox in the picture. A measured correction factor would only add
+error.
+
+What *was* worth taking from that calibration loop is the settle delay.
+It waits 300 ms between a move and the screenshot it measures, and for
+good reason: the target's compositor has to draw the cursor and the
+capture pipeline has to carry the frame. `glasshouse_mouse_move` therefore
+takes `settle_ms`, because a caller that moves and immediately captures
+otherwise sees the pointer in its old position.
+
+Both transform paths are asserted to agree exactly:
+`desktopPixelMatchesCursorPathAtSamePoint` drives five points through the
+cursor path and the pixel path and compares the wire values, so a
+tool-driven click cannot land somewhere other than where the same
+coordinate lands by hand.
+
+**Tools.** `glasshouse_session` (screens, desktop, HID routing — call it
+first), `glasshouse_screenshot` (live frame as PNG, `max_width` default
+1280 since base64 in a JSON body is not free, 0 for native),
+`glasshouse_type` (through `/api/hid/print` with the §10.9 sanitiser, so
+unmappable characters are reported rather than silently lost),
+`glasshouse_keys` (chord: pressed in order, released in reverse),
+`glasshouse_mouse_move`, `glasshouse_mouse_click`,
+`glasshouse_mouse_scroll`.
+
+Every input tool checks three things before sending — a HID master exists,
+it is connected, and kvmd reports the target's HID online — and names
+which one failed. A keystroke that goes nowhere is worse than a refusal,
+because the model cannot tell the difference without being told.
+
+**Posture.** Off by default, `127.0.0.1` when on. This is a remote-control
+surface for the target: anything that reaches the port can type on and
+click it. `mcp.token` sets a required bearer token, resolved as a
+`secret://` ref like any password — and a token that is configured but
+cannot be resolved stops the server rather than silently downgrading to an
+open port. Tool activity flashes on every window's status bar, because
+something else driving the keyboard should be visible rather than silent.
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
@@ -1128,6 +1219,7 @@ still reports `finished`, so the spinner is torn down on exactly one path.
 | Runaway clipboard paste into a live target | open (bounded) | §10.9 — chunks are sequenced so a second hotkey press aborts the remainder; what already reached the HID stays typed |
 | Tui API key leaking into config or logs | **resolved** | `ocr.api_key` is a `secret://` ref resolved via SecretResolver (env or `secrets.yaml`, 0600); the key is never logged |
 | Region capture sends target screen content to an external service | open (by design) | The user chooses the rectangle each time and nothing is sent without a deliberate drag; endpoint is configurable |
+| Local MCP server lets any local process drive the target | open (bounded) | §10.11 — off by default, loopback-only when on, optional bearer token that fails closed when unresolvable, and every tool call flashes on the status bar so it is not silent |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
 | `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |
 

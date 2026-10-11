@@ -22,3 +22,12 @@ target_link_libraries(test_keymap
         Qt6::Gui
 )
 add_test(NAME keymap COMMAND test_keymap)
+
+qt_add_executable(test_mcpserver test_mcpserver.cpp)
+target_link_libraries(test_mcpserver
+    PRIVATE
+        glasshouse_mcp
+        Qt6::Test
+        Qt6::Network
+)
+add_test(NAME mcpserver COMMAND test_mcpserver)
