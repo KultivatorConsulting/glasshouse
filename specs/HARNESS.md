@@ -1,7 +1,8 @@
 # Glasshouse harness — design
 
 Status: **proposed, unbuilt.** Captured 2026-10-11 from a design
-discussion; §5.4, §6.1 and the §9–§10 decisions added 2026-10-12.
+discussion; §5.4, §5.5, §6.1, §8.1 and the §9–§10 decisions added
+2026-10-12.
 Nothing here is implemented; the pieces it depends on (region capture,
 clipboard paste) are. See DESIGN.md §10.9 / §10.10.
 
@@ -97,7 +98,8 @@ paragraph in that window" is one confirmation showing the text.
 
 Which means the first act path is nearly built already: the assistant
 drafts, the user approves, the text goes in through `/api/hid/print`,
-reusing the sanitiser, the sequenced chunks and the abort from §10.9.
+reusing the sanitiser, the sequenced chunks and the abort from
+DESIGN.md §10.9.
 The only new part is a model generating the text instead of the
 clipboard holding it.
 
@@ -109,24 +111,27 @@ need for it.
 
 ## 5. Watchers
 
-The user describes what to watch in words. Resolving that description to
-a rectangle is expensive and happens once; checking the rectangle is
+The user says what to watch — in words, or by dragging the rectangle
+themselves (§5.5). Getting the rectangle happens once; checking it is
 cheap and happens continuously.
 
 > "Watch the system bar, and if a bullet with a number appears over the
 > Chrome icon, that is a new email — let me know."
 
-1. **Locate (once, costly).** Send the full screen to Tui with the
-   description; it returns the best bounding rectangle.
+1. **Locate (once).** Either send the full screen to a vision provider
+   with the description and take the rectangle it returns, or take the
+   rectangle the user dragged. Two modes, one output — see §5.5.
 2. **Register.** Store `{screen index, rect in frame pixels,
    description, prompt, trigger kind, cooldown, reference patch}`.
 3. **Watch (continuous, local, free).** Compare the rectangle against
    its reference. No model involved.
-4. **Fire.** On a change, snapshot the crop and open a Kahu turn with it
-   and the original intent.
-5. **Judge.** The assistant decides whether the thing actually happened,
-   with the whole conversation as context, and answers in the
-   conversation.
+4. **Fire.** On a change, snapshot the crop, append the event to the
+   watcher's log and — if the watcher asked for it — raise a host
+   notification. Nothing is pushed to a consumer; the event waits to be
+   collected via `watchers/poll` (§9.1).
+5. **Judge.** Whatever consumed the event decides whether the thing
+   actually happened, with the conversation as context, and answers
+   there. §8.1 has the three kinds of consumer this can be.
 
 The local detector is allowed to be trigger-happy, because the model
 filters it. That is what lets a cheap pixel comparison be good enough.
@@ -138,12 +143,15 @@ a resolution change invalidates every stored rectangle outright.
 
 The durable thing is the sentence the user wrote. Coordinates are a
 derived lookup that can always be recomputed by replaying step 1. The
-layout-drift detection in §10.8 is the natural hook: when it fires, mark
-the registry stale and re-locate.
+layout-drift detection in DESIGN.md §10.8 is the natural hook: when it
+fires, mark the registry stale and re-locate.
 
 Rectangles are stored in **frame pixels with a screen index**, not
 window coordinates, so they survive the user moving or resizing a
 Glasshouse window.
+
+None of this applies to a hand-drawn rectangle, which has no sentence to
+replay. §5.5 gives it a different and cheaper recovery path.
 
 ### 5.2 Noise is where this will bite
 
@@ -267,6 +275,41 @@ Above the ceiling, volatile is **refused rather than silently
 degraded**: the watcher still works, it simply keeps no history, and the
 user is told which of the two they got.
 
+### 5.5 Manual and prompted selection are peers
+
+Dragging the rectangle is a first-class way to create a watcher, not a
+fallback. `RegionSelector` already emits `selected(QRect imageRect)` in
+image-pixel coordinates — precisely the storage format step 2 wants — so
+a manual watcher is the existing, proven selector feeding a registry
+entry, on the free `Ctrl+Shift+Alt+W`, with the same drag already
+trusted for extraction (DESIGN.md §10.10).
+
+It earns its place on three counts:
+
+* **No provider needed.** Prompted selection requires a vision-capable
+  provider (§6.1); dragging requires nothing. A `command`-only or
+  fully offline install gets watchers.
+* **No locate error.** A described region can come back wrong. A
+  dragged one is exactly what was meant.
+* **It is how the detector gets debugged.** Testing §5.2's noise
+  defences and §5.4's retention needs a rectangle, not a round trip to
+  a model.
+
+**Manual replaces step 1 and nothing else.** In particular it does not
+replace the intent text: "watch this rectangle" says nothing about what
+to care about, so step 5 still needs the sentence. The prompt and the
+locating are separable, and only the second is what the two modes
+disagree about.
+
+**The drift story differs, and manual comes out ahead.** §5.1 rests on
+replaying the description, which a hand-drawn rectangle cannot do. What
+it can do is template-match its stored reference patch to re-find
+itself — the self-healing §6 already proposes for drifted anchors. That
+is local, free, and needs no model call, so a manual watcher recovers
+from a re-flowed taskbar more cheaply than a described one does. Both
+modes should therefore store the reference patch, which step 2 already
+says they do.
+
 ## 6. Local vision: OpenCV
 
 Available from the distribution (`libopencv-core406t64`,
@@ -293,8 +336,9 @@ system instead of a model that already works.
 
 ### 6.1 The remote half is pluggable
 
-Region extraction (§10.10) currently constructs a `TuiClient` directly.
-That was right for one feature on one workstation and wrong as the only
+Region extraction (DESIGN.md §10.10) currently constructs a `TuiClient`
+directly. That was right for one feature on one workstation and wrong as
+the only
 option in a public LGPL-3.0 repository: a clone that does nothing
 without a Kultivator API key is a poor artifact, and it leaves the
 privacy row in §11 with no mitigation but "the user chose the
@@ -333,7 +377,7 @@ same requirements:
 
 | stage | needs |
 |---|---|
-| region extraction (§10.10) | any provider, including `command` |
+| region extraction (DESIGN.md §10.10) | any provider, including `command` |
 | watcher **detection** | nothing — OpenCV, local, always available |
 | watcher **locate** (§5 step 1) | a **vision-capable** provider; `command` and Tesseract cannot find "the Chrome icon in the system bar" |
 | watcher **judge** (§5 step 5) | the harness's own model, which is the private package's business |
@@ -379,7 +423,7 @@ conversation that already has context, so the assistant is not reporting
 the user has been doing. Items persist until read; a restart must not
 lose an unread one. The only ambient signal is something quiet, such as
 an unread count in the status bar (the extraction-spinner slot added in
-§10.10 is the right shape).
+DESIGN.md §10.10 is the right shape).
 
 **A host notification, per watcher, opt-in.** Most watchers stay quiet.
 A few — "tell me when Ash replies" — are explicitly asked to chase the
@@ -388,6 +432,41 @@ reach them. `org.freedesktop.Notifications` over D-Bus; a daemon is live
 on the session and Qt's DBus module is already in the build Qt. A
 notification can carry an action, so it should open straight to that
 conversation rather than merely saying something happened.
+
+### 8.1 Three consumer tiers
+
+A watcher firing into a log nobody reads is worth nothing, so it is fair
+to ask what consumes the events. There are three answers, and only the
+third is the harness:
+
+| tier | consumer | what it gives | what it lacks |
+|---|---|---|---|
+| 1 | none — the viewer itself | the opt-in D-Bus notification above, fired directly: "the region you marked changed" | no judgement; it cannot tell a real event from the clock ticking |
+| 2 | any MCP client | judgement on demand, on a surface that already exists | no background presence; it only looks when opened |
+| 3 | `glasshouse-harness` | §8's two channels: accumulated context, proposal, persistence | has to be built |
+
+Tier 1 costs almost nothing, because §8's D-Bus path is wanted anyway.
+It is dumb but not useless — "something changed in the build output"
+is a real thing to want.
+
+**Tier 2 is the one worth noticing**, because it already works. Claude
+Code is an MCP client; pointing it at the Glasshouse MCP server gives
+`watchers/poll` a real consumer with no private-repo work at all. This
+is the same way the existing PiKVM MCP server is already used.
+
+**Which settles the build order.** Ship the public side first — watcher
+engine, MCP server, both selection modes — and consume it from tier 2
+until the event shape and the `watchers/poll` contract have been
+exercised by a real client. Only then build the harness, against a
+surface that has been used rather than imagined. Doing it the other way
+round means freezing the tool contract against a hypothetical consumer
+and discovering its shape is wrong after the Tauri shell exists, which
+is the expensive part.
+
+Tier 3 remains the end state, not a nicety: tier 2 is not sitting in the
+background polling every thirty seconds, so "I stepped away — tell me
+when Ash replies" genuinely needs something persistent. It is just not a
+prerequisite for building or validating any of the rest.
 
 ## 9. Where the code lives: public viewer, private harness
 
@@ -491,8 +570,8 @@ chain is detect -> buffer -> harness polls -> D-Bus.
   cosmetic wart in the About box. Fix it before there are two packages
   to keep in step. The MCP surface needs versioning too, which MCP's
   capability negotiation already provides.
-* **Secrets.** One file. The Tui key for §10.10 extraction already
-  resolves through `SecretResolver` from
+* **Secrets.** One file. The Tui key for DESIGN.md §10.10 extraction
+  already resolves through `SecretResolver` from
   `~/.config/glasshouse/secrets.yaml`, so the harness adds a key there
   rather than inventing a second store.
 
@@ -540,10 +619,10 @@ Still open:
 * **Watcher persistence format.** Where the registry lives across
   restarts, and whether a stale rectangle re-locates eagerly on startup
   or lazily on first miss.
-* **Which vision-capable providers are worth testing** for the locate
-  step beyond Tui (§6.1), and whether a local vision model is good
-  enough at finding a named UI element to make watchers work on a
-  `command`-only install.
+* **Which vision-capable providers are worth testing** for prompted
+  locating beyond Tui (§6.1). Less pressing than it was: §5.5 means a
+  provider-less install still gets watchers, so this decides how good
+  *prompted* selection can be made, not whether watchers work at all.
 
 ## 11. Privacy posture
 
