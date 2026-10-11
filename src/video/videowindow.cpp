@@ -1,5 +1,6 @@
 #include "videowindow.h"
 #include "coord_transform.h"
+#include "regionselector.h"
 #include "keymap.h"
 #include "logging.h"
 
@@ -19,12 +20,15 @@
 #include <QMouseEvent>
 #include <QSettings>
 #include <QShortcut>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTimer>
+#include <QVideoFrame>
 #include <QVideoSink>
 #include <QVideoWidget>
 #include <QWheelEvent>
 
+#include <iterator>
 #include <optional>
 
 namespace glasshouse {
@@ -95,7 +99,30 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     // changes (e.g. someone wants stretched fill), the math has to be
     // updated alongside.
     m_video->setAspectRatioMode(Qt::KeepAspectRatio);
-    setCentralWidget(m_video);
+
+    // The region selector replaces the video widget rather than covering
+    // it — see regionselector.h. Both are pages of this stack, which is
+    // the central widget. transformFor() still measures m_video, and
+    // mapToGlobal accounts for the extra nesting, so the coord maths is
+    // unaffected.
+    m_selector = new RegionSelector(this);
+    m_stack    = new QStackedWidget(this);
+    m_stack->addWidget(m_video);
+    m_stack->addWidget(m_selector);
+    m_stack->setCurrentWidget(m_video);
+    setCentralWidget(m_stack);
+
+    connect(m_selector, &RegionSelector::cancelled, this, [this]() {
+        endRegionSelect();
+        flashStatus(QStringLiteral("region capture cancelled"), 2000);
+    });
+    connect(m_selector, &RegionSelector::selected, this,
+            [this](const QRect& imageRect) {
+        const QImage still = m_selectorImage;
+        endRegionSelect();
+        if (still.isNull() || imageRect.isEmpty()) return;
+        emit regionCaptured(still.copy(imageRect));
+    });
     setWindowTitle(QStringLiteral("Glasshouse Viewer"));
     resize(1280, 720);
 
@@ -108,8 +135,15 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
         "Target capture resolution. Shows ≠ config when the target's display "
         "settings no longer match target.monitors — see DESIGN.md §10.8."));
 
+    // Permanent rather than a transient showMessage: a spinner that an
+    // unrelated status update can wipe out halfway through is worse than
+    // none. Hidden unless there is actually work in flight.
+    m_busyLabel = new QLabel(QString(), this);
+    m_busyLabel->hide();
+
     auto* bar = statusBar();
     bar->addWidget(m_statusLabel, 1);
+    bar->addPermanentWidget(m_busyLabel);
     bar->addPermanentWidget(m_resLabel);
     bar->addPermanentWidget(m_decoderLabel);
     bar->addPermanentWidget(m_latencyLabel);
@@ -226,16 +260,19 @@ QVideoSink* VideoWindow::videoSink() const {
 
 void VideoWindow::setCaptureContext(const QRect& targetMonitor,
                                     const QSize& logicalDesktop,
-                                    const QString& releaseHotkey,
-                                    const QString& fullscreenHotkey,
-                                    const QString& specialKeysHotkey,
-                                    const QString& pasteHotkey) {
+                                    const CaptureHotkeys& hotkeys) {
+    const QString& releaseHotkey     = hotkeys.release;
+    const QString& fullscreenHotkey  = hotkeys.fullscreen;
+    const QString& specialKeysHotkey = hotkeys.specialKeys;
+    const QString& pasteHotkey       = hotkeys.paste;
+    const QString& regionHotkey      = hotkeys.region;
     m_targetMonitor     = targetMonitor;
     m_logicalDesktop    = logicalDesktop;
     m_releaseHotkey     = encodeHotkey(releaseHotkey);
     m_fullscreenHotkey  = encodeHotkey(fullscreenHotkey);
     m_specialKeysHotkey = encodeHotkey(specialKeysHotkey);
     m_pasteHotkey       = encodeHotkey(pasteHotkey);
+    m_regionHotkey      = encodeHotkey(regionHotkey);
     if (m_releaseHotkey == 0 && !releaseHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable release_hotkey:" << releaseHotkey;
     }
@@ -247,6 +284,9 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
     }
     if (m_pasteHotkey == 0 && !pasteHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable paste_hotkey:" << pasteHotkey;
+    }
+    if (m_regionHotkey == 0 && !regionHotkey.isEmpty()) {
+        qCWarning(lcHid) << "unparseable region_hotkey:" << regionHotkey;
     }
 
     // Pre-capture path: while no widget has Qt's keyboard grab, the
@@ -269,6 +309,12 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
         sc->setContext(Qt::WindowShortcut);
         connect(sc, &QShortcut::activated,
                 this, &VideoWindow::requestClipboardPaste);
+    }
+    if (m_regionHotkey != 0) {
+        auto* sc = new QShortcut(QKeySequence(regionHotkey), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated,
+                this, &VideoWindow::requestRegionCapture);
     }
 }
 
@@ -434,6 +480,137 @@ void VideoWindow::requestClipboardPaste() {
     emit pasteClipboardRequested();
 }
 
+namespace {
+
+// Braille dots read as a smooth rotation at ~10 fps and need no artwork.
+const char* const kSpinnerFrames[] = {
+    "⠋", "⠙", "⠹", "⠸", "⠼",
+    "⠴", "⠦", "⠧", "⠇", "⠏",
+};
+constexpr int kSpinnerCount = int(std::size(kSpinnerFrames));
+constexpr int kSpinnerIntervalMs = 100;
+
+}  // namespace
+
+void VideoWindow::setBusy(const QString& text) {
+    m_busyText  = text;
+    m_busyFrame = 0;
+    m_busyClock.start();
+
+    if (!m_busyTimer) {
+        m_busyTimer = new QTimer(this);
+        m_busyTimer->setInterval(kSpinnerIntervalMs);
+        connect(m_busyTimer, &QTimer::timeout, this, [this]() {
+            m_busyFrame = (m_busyFrame + 1) % kSpinnerCount;
+            // Elapsed seconds matter as much as the animation: "still going"
+            // and "going badly" look identical without them.
+            m_busyLabel->setText(
+                QStringLiteral("%1 %2 %3s — hotkey cancels")
+                    .arg(QString::fromUtf8(kSpinnerFrames[m_busyFrame]),
+                         m_busyText)
+                    .arg(m_busyClock.elapsed() / 1000));
+        });
+    }
+
+    if (!m_busy) {
+        // Pushed once, popped once in clearBusy. While captured this sits on
+        // top of the cursor marker, which comes back when the work finishes.
+        QApplication::setOverrideCursor(Qt::BusyCursor);
+        m_busy = true;
+    }
+    m_busyLabel->setText(QStringLiteral("%1 %2 0s — hotkey cancels")
+                             .arg(QString::fromUtf8(kSpinnerFrames[0]), m_busyText));
+    m_busyLabel->show();
+    m_busyTimer->start();
+}
+
+void VideoWindow::clearBusy() {
+    if (!m_busy) return;
+    m_busy = false;
+    if (m_busyTimer) m_busyTimer->stop();
+    m_busyLabel->hide();
+    m_busyLabel->clear();
+    QApplication::restoreOverrideCursor();
+}
+
+VideoWindow* VideoWindow::captureHolder() const {
+    for (auto* win : sessionWindows()) {
+        if (win->m_captured) return win;
+    }
+    return nullptr;
+}
+
+void VideoWindow::suspendCaptureGrabs() {
+    if (!m_captured) return;
+    // m_captured stays true: the session is still captured, we are only
+    // standing the Qt grabs down so another widget can be interacted with.
+    m_video->releaseMouse();
+    m_video->releaseKeyboard();
+    // Drop the capture cursor marker so the selector's crosshair shows.
+    QApplication::restoreOverrideCursor();
+}
+
+void VideoWindow::resumeCaptureGrabs() {
+    if (!m_captured) return;
+    QApplication::setOverrideCursor(m_markerCursor);
+    m_video->grabMouse();
+    m_video->grabKeyboard();
+}
+
+void VideoWindow::requestRegionCapture() {
+    // Pressing it again while an extraction is running means "stop
+    // waiting", not "start another" — the request can take many seconds
+    // and the second press is almost always impatience.
+    for (auto* win : sessionWindows()) {
+        if (win->m_busy) {
+            emit win->busyCancelRequested();
+            return;
+        }
+    }
+
+    // While captured the hotkey lands on the grab holder regardless of where
+    // the pointer is, but the user means the window they are looking at.
+    VideoWindow* target = windowForCursor(QCursor::pos());
+    if (!target) target = const_cast<VideoWindow*>(this);
+    target->beginRegionSelect();
+}
+
+bool VideoWindow::beginRegionSelect() {
+    if (m_selecting) return false;
+
+    QVideoSink* sink = m_video->videoSink();
+    const QImage still = sink ? sink->videoFrame().toImage() : QImage();
+    if (still.isNull()) {
+        qCWarning(lcOcr) << "region capture: no video frame to select from";
+        flashStatus(QStringLiteral("region capture: no video frame yet"));
+        return false;
+    }
+
+    // Stand the grabs down (on whichever window holds them) so the drag and
+    // Esc reach the selector. The pointer confiner stays up, so the pointer
+    // still can't leave the session windows mid-drag.
+    if (VideoWindow* holder = captureHolder()) holder->suspendCaptureGrabs();
+
+    m_selectorImage = still;
+    m_selector->setImage(still);
+    m_stack->setCurrentWidget(m_selector);
+    m_selector->setFocus(Qt::OtherFocusReason);
+    m_selecting = true;
+
+    qCInfo(lcOcr) << "region capture: selecting from" << still.size();
+    return true;
+}
+
+void VideoWindow::endRegionSelect() {
+    if (!m_selecting) return;
+    m_selecting = false;
+    m_stack->setCurrentWidget(m_video);
+    m_selectorImage = QImage();
+    // Hand the image back before re-grabbing, so a slow consumer can't hold
+    // the grabs down. Restores on the holder, which may be a sibling.
+    if (VideoWindow* holder = captureHolder()) holder->resumeCaptureGrabs();
+}
+
 void VideoWindow::releaseHeldModifiers() {
     for (const auto& mod : {
             QStringLiteral("ShiftLeft"),  QStringLiteral("ShiftRight"),
@@ -471,6 +648,9 @@ void VideoWindow::stopCapture() {
 }
 
 void VideoWindow::closeEvent(QCloseEvent* ev) {
+    // Closing mid-extraction would otherwise strand the busy cursor over
+    // the whole application.
+    clearBusy();
     if (m_captured) stopCapture();
     if (!m_persistHost.isEmpty()) {
         // saveGeometry packages position, size, and the maximized /
@@ -620,6 +800,9 @@ bool VideoWindow::handleWheel(QWheelEvent* ev) {
     // scrolls wherever its cursor already is, put there by the move stream
     // — and every window's mouseWheel signal routes to the same HID master,
     // so any session window may emit it. See DESIGN.md §10.7.
+    // Selecting a region is a local interaction; nothing should reach the
+    // target while the selector is up.
+    if (m_selecting) return false;
     if (!m_captured && !m_sessionCaptured) return false;
     // PiKVM accepts signed-int wheel deltas and clamps internally. QWheel's
     // angleDelta is in 1/8-degrees; one notch = 120. Stepped mice deliver
@@ -655,6 +838,10 @@ bool VideoWindow::handleKey(QKeyEvent* ev, bool pressed) {
         }
         if (m_pasteHotkey != 0 && combo == m_pasteHotkey) {
             requestClipboardPaste();
+            return true;
+        }
+        if (m_regionHotkey != 0 && combo == m_regionHotkey) {
+            requestRegionCapture();
             return true;
         }
     }

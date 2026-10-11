@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`VideoWindow::setCaptureContext` takes a `CaptureHotkeys` struct**
+  instead of five adjacent `QString` parameters. Two transposed hotkeys
+  would have bound silently and misbehaved later.
 - **Quieter logging.** Categories now default to Info level, so the
   high-frequency debug output — per-frame WebSocket state dumps, the
   per-second video telemetry, and per-event HID drops during a reconnect —
@@ -61,6 +64,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See DESIGN.md §10.2.
 
 ### Added
+- **Region capture to text (`Ctrl+Alt+Shift+C`, configurable via
+  `region_hotkey`).** Freezes the video frame of the window *under the
+  pointer* — not the focused one, which while captured is rarely the one
+  you're looking at — dims it, and lets you drag out a rectangle. The crop
+  goes to Tui and the extracted text lands on the host clipboard. Esc,
+  right-click, or a drag under 8px cancels. The selector replaces the
+  video widget rather than overlaying it, so there's no compositing
+  question and the target can't shift under you mid-drag; the capture
+  survives the round trip, with only the Qt grabs standing down (pointer
+  confinement stays up) so the drag can reach the selector. Configure
+  under `ocr:`; `api_key` takes a `secret://` reference so the key stays
+  out of `config.yaml`. Without a key the selector still works and says
+  what's missing. New `glasshouse.ocr` logging category. See DESIGN.md
+  §10.10.
+- **Progress indication for text extraction.** The round trip to the model
+  can take many seconds, where a static status line is indistinguishable
+  from a hang. The requesting window now shows an animated spinner with an
+  elapsed-seconds count, as a permanent status-bar widget so an unrelated
+  status update can't wipe it out, plus a busy cursor under the pointer.
+  Pressing the region hotkey again abandons the request instead of
+  queueing a second one.
 - **Paste the host clipboard onto the target (`Ctrl+Alt+Shift+V`,
   configurable via `paste_hotkey`).** Types the clipboard through the HID
   master's `POST /api/hid/print`, so the target's own keymap decides what

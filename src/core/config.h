@@ -52,6 +52,28 @@ struct VideoSpec {
     int     cursor_marker_size  = 24;
 };
 
+// Region-capture text extraction: the hotkey grabs a rectangle of the
+// frozen video frame, sends it to Tui, and puts the reply on the host
+// clipboard. See DESIGN.md §10.10. `api_key` takes a `secret://<name>`
+// reference resolved through SecretResolver, so the key itself never
+// appears in config.yaml.
+struct OcrSpec {
+    QString endpoint = QStringLiteral(
+        "https://chat.kultivator.net.nz/v1/chat/completions");
+    QString api_key;                                  // secret:// ref
+    QString model            = QStringLiteral("auto");
+    // Reasoning is pure cost for transcription, and it eats the token
+    // budget — Tui answers 200 with empty content when it runs out.
+    QString reasoning_effort = QStringLiteral("none");
+    int     max_tokens       = 8000;
+    int     timeout_ms       = 60000;
+    // Default asks for a verbatim transcription, because the result goes
+    // straight to the clipboard and a description isn't pasteable. Set
+    // this to ask for something else (a summary, a description, JSON).
+    QString prompt = QStringLiteral(
+        "Transcribe every piece of text visible in this image exactly as it appears, preserving reading order and line breaks. Output only the transcribed text: no commentary, no headings, no code fences. If the image contains no text, output nothing.");
+};
+
 // Custom chord entry for the special-keys palette / future macro-pad
 // daemon. `keys` is a list of MDN KeyboardEvent.code names (the same
 // `web_name` strings PiKVM's send_shortcut endpoint expects).
@@ -69,8 +91,10 @@ struct Config {
     QString                fullscreen_hotkey;
     QString                special_keys_hotkey;
     QString                paste_hotkey;
+    QString                region_hotkey;
     QList<ShortcutSpec>    shortcuts;       // optional, populates the palette
     VideoSpec              video;
+    OcrSpec                ocr;
     QList<WindowSpec>      windows;
 };
 

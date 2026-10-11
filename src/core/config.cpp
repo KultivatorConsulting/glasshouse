@@ -177,6 +177,7 @@ ConfigResult loadConfig(const QString& path) {
     cfg.fullscreen_hotkey   = yamlString(root, "fullscreen_hotkey");
     cfg.special_keys_hotkey = yamlString(root, "special_keys_hotkey");
     cfg.paste_hotkey        = yamlString(root, "paste_hotkey");
+    cfg.region_hotkey       = yamlString(root, "region_hotkey");
 
     // shortcuts list — optional. Each entry: {label: "...", keys: [...]}.
     if (const auto sc = root["shortcuts"]; sc && sc.IsSequence()) {
@@ -207,6 +208,24 @@ ConfigResult loadConfig(const QString& path) {
         cfg.video.cursor_marker_color = QString::fromStdString(
             yamlScalarOr<std::string>(v, "cursor_marker_color", "#FFA000"));
         cfg.video.cursor_marker_size  = yamlScalarOr<int>(v, "cursor_marker_size", 24);
+    }
+
+    // ocr — all optional; defaults live in the struct so an absent
+    // block still yields a working Tui configuration bar the API key.
+    if (const auto o = root["ocr"]; o) {
+        const OcrSpec d;
+        cfg.ocr.endpoint = QString::fromStdString(yamlScalarOr<std::string>(
+            o, "endpoint", d.endpoint.toStdString()));
+        cfg.ocr.api_key  = yamlString(o, "api_key");
+        cfg.ocr.model    = QString::fromStdString(yamlScalarOr<std::string>(
+            o, "model", d.model.toStdString()));
+        cfg.ocr.reasoning_effort = QString::fromStdString(
+            yamlScalarOr<std::string>(o, "reasoning_effort",
+                                      d.reasoning_effort.toStdString()));
+        cfg.ocr.max_tokens = yamlScalarOr<int>(o, "max_tokens", d.max_tokens);
+        cfg.ocr.timeout_ms = yamlScalarOr<int>(o, "timeout_ms", d.timeout_ms);
+        cfg.ocr.prompt     = QString::fromStdString(yamlScalarOr<std::string>(
+            o, "prompt", d.prompt.toStdString()));
     }
 
     // windows

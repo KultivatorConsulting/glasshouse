@@ -534,6 +534,31 @@ window had focus when it was opened. Opening the palette releases
 the parent window's keyboard grab (Qt focus semantics) — the user
 re-clicks a window to re-capture.
 
+### Phase 9 — Region capture to text — done
+A hotkey (`region_hotkey`, default `Ctrl+Alt+Shift+C`) freezes the
+current video frame of the window **under the pointer**, lets the user
+drag out a rectangle, sends that crop to Tui, and puts the extracted
+text on the host clipboard. `RegionSelector` owns the drag; `TuiClient`
+owns the request; `main.cpp` joins them to the clipboard.
+
+The window under the pointer is deliberately not the focused window:
+while captured, the hotkey is delivered to whichever window holds the
+grabs, which is rarely the one the user is looking at.
+
+Configuration lives under `ocr:` — endpoint, model, `max_tokens`,
+`reasoning_effort`, timeout and the prompt are all overridable, and
+`api_key` is a `secret://` reference so the key stays out of
+`config.yaml`. The default prompt asks for a verbatim transcription,
+because the result goes straight to the clipboard and a description of
+the screen is not something you can paste. Point `prompt` at something
+else to get something else. Without a resolvable key the selector still
+works and says what is missing.
+
+Extraction is a model round trip and can run for many seconds, so the
+window shows a spinner with an elapsed-seconds count and puts a busy
+cursor under the pointer for the duration; pressing the hotkey again
+abandons the request. See §10.10.
+
 ### Out of scope for v1
 * Clipboard sync between local and target.
 * Audio (microphone to target, speaker from target).
@@ -981,9 +1006,85 @@ irreversible, which argues for confirming first. A modal dialog is the wrong
 instrument here: raised while the video widget holds `grabMouse`/
 `grabKeyboard`, it cannot be clicked or dismissed, which is a worse failure
 than the one it prevents. Abort-on-second-press plus a character count in the
-status bar covers the same ground without touching the grab — and grab churn
-is the change class that froze input twice during the confinement work
-(§10.3, `capture_cursor_confinement`).
+status bar covers the same ground without raising a dialog into an active
+grab at all. (For the record, what froze input twice during the
+confinement work was `QCursor::setPos` *during* a grab feeding synthetic
+motion back through `grabMouse` — not grab churn as such; Qt transfers the
+grab between windows routinely here.)
+
+### 10.10 Region capture to text (verified 2026-10-11)
+
+**The selector replaces the video rather than covering it.** Overlaying a
+child widget on a `QVideoWidget` means compositing against whatever surface
+the video backend is using, which is not a property worth depending on.
+Instead both are pages of a `QStackedWidget` and the selector is shown in the
+video's place, painting a still with the same `computeLetterbox` maths at the
+same geometry — so the swap is visually seamless and a selection lands where
+it was drawn. Selecting from a still is better behaviour anyway: the target
+cannot move under the user mid-drag, and the pixels they get are the ones
+they were looking at when they pressed the key.
+
+Verified first that the frame is actually there to freeze: `QVideoSink`
+retains the last frame, `videoFrame().toImage()` returns it at full
+resolution, and it is the *latest* frame, not the first.
+
+**The grabs stand down, the confinement stays up.** The drag and Esc have to
+reach the selector, which cannot happen while the video widget holds
+`grabMouse`/`grabKeyboard`. `suspendCaptureGrabs()` releases just the two Qt
+grabs and the cursor marker; `m_captured`, the session-capture state, the
+badge and the XFixes pointer barriers are all left alone, so the pointer
+still cannot stray off the session windows mid-drag and the capture survives
+the round trip. (This is a grab release and re-acquire, which is routine —
+what froze input during the confinement work was `QCursor::setPos` *during* a
+grab, not grab transfer. See §10.3.)
+
+**Edge pixels.** Mapping the drag with rounded inclusive edges loses the
+fraction of an image pixel the last widget column covers: selecting an entire
+1920×1080 frame yielded 1919×1079. Widget pixel N covers image pixels
+`[N·s, (N+1)·s)`, so the rect is built from a floored left edge and a ceiled
+exclusive right edge, taking every image pixel the selection touches.
+
+| case | drag | result |
+|---|---|---|
+| exact half scale | 201×151 widget px | 402×302 image px |
+| whole frame, letterboxed widget | full widget | 1920×1080 |
+| drag running off the frame | past the edge | clamped inside the image |
+| click, or a nudge under 8 px | — | cancelled, nothing sent |
+
+**Tui specifics.** PNG rather than JPEG, so text edges stay crisp. A
+1920×1080 frame is 2.07 MP, just under the ~2.1 MP above which Tui downscales
+server-side, so even a full-frame selection survives at native resolution.
+`reasoning_effort: none` — reasoning is pure latency for transcription, and
+it competes for the token budget: when it exhausts `max_tokens` the server
+answers **200 with empty content and no explanation**, so an empty reply is
+reported as a failure rather than quietly copied onto the clipboard. The
+documented statuses (401 key, 429 quota, 422 validation, 400 context) are
+named in the status bar, because "Error transferring…" says nothing about
+which knob to reach for.
+
+**Showing that it is still working.** Extraction routinely takes several
+seconds and a static status line cannot be told apart from a hang, so the
+requesting window shows an animated spinner *and* an elapsed-seconds
+count — "still going" and "going badly" look identical without the
+number. The spinner is a permanent status-bar widget, not a transient
+`showMessage`, which an unrelated status update would wipe out halfway
+through. A busy cursor goes up at the same time, because the pointer is
+where the user is actually looking; while captured it stacks on top of
+the capture marker, which returns when the work ends.
+
+That cursor is the thing to be careful with: `setOverrideCursor` is
+application-wide and stack-based, so a `setBusy` without its matching
+`clearBusy` strands every window on a busy cursor. It is pushed exactly
+once, popped exactly once on every completion path (success, failure,
+cancel, timeout), `clearBusy` is a no-op when idle so it cannot pop
+someone else's cursor, and `closeEvent` clears it in case the window goes
+away mid-request. Verified by asserting the stack returns to the capture
+marker afterwards, including on a redundant clear.
+
+A second hotkey press while the spinner is up cancels rather than queueing
+another request — after several seconds of waiting, pressing it again is
+impatience, not a new request. `TuiClient::cancel()` aborts the reply and
+still reports `finished`, so the spinner is torn down on exactly one path.
 
 ## 11. Risks and mitigations
 
@@ -997,6 +1098,8 @@ is the change class that froze input twice during the confinement work
 | Target display settings change resolution | **resolved (detected)** | §10.8 — status-bar resolution readout plus an INFO/WARNING split on whether the mapping is actually affected |
 | Clipboard text the target keymap can't type | **resolved (mitigated)** | §10.9 — common Unicode punctuation folded to ASCII, CRLF normalised, remainder dropped with a count shown; kvmd discards it silently otherwise |
 | Runaway clipboard paste into a live target | open (bounded) | §10.9 — chunks are sequenced so a second hotkey press aborts the remainder; what already reached the HID stays typed |
+| Tui API key leaking into config or logs | **resolved** | `ocr.api_key` is a `secret://` ref resolved via SecretResolver (env or `secrets.yaml`, 0600); the key is never logged |
+| Region capture sends target screen content to an external service | open (by design) | The user chooses the rectangle each time and nothing is sent without a deliberate drag; endpoint is configurable |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
 | `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |
 

@@ -2,6 +2,7 @@ qt_add_library(glasshouse_video STATIC
     videopipeline.h     videopipeline.cpp
     mjpegpipeline.h     mjpegpipeline.cpp
     videowindow.h       videowindow.cpp
+    regionselector.h    regionselector.cpp
     janusclient.h       janusclient.cpp
     specialkeysdialog.h specialkeysdialog.cpp
     msddialog.h         msddialog.cpp

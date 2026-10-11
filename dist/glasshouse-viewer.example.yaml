@@ -49,6 +49,22 @@ special_keys_hotkey: "Ctrl+Alt+K"
 # Types the host clipboard onto the target as keystrokes, via the HID
 # master's server-side keymap. Text-only; press again mid-paste to abort.
 paste_hotkey:        "Ctrl+Alt+Shift+V"
+# Drag out a region of the window under the cursor, extract its text via
+# Tui, and put the result on the host clipboard. Needs ocr.api_key below.
+region_hotkey:       "Ctrl+Alt+Shift+C"
+
+# Region-capture text extraction (see region_hotkey). Everything except
+# api_key is optional; the defaults shown are what the viewer uses.
+ocr:
+  api_key: "secret://tui-api-key"   # resolved via secrets.yaml or
+                                    # GLASSHOUSE_SECRET_TUI_API_KEY
+  # endpoint: "https://chat.kultivator.net.nz/v1/chat/completions"
+  # model: "auto"
+  # reasoning_effort: "none"        # transcription needs no reasoning
+  # max_tokens: 8000                # below this the model can return
+                                    # 200 with empty content
+  # timeout_ms: 60000
+  # prompt: "..."                  # default asks for verbatim text
 
 # Optional. Each entry produces a button in the Special Keys palette's
 # Custom tab (and is the source of truth for the future macro-pad daemon).

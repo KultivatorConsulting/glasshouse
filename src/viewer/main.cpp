@@ -12,10 +12,12 @@
 #include "pikvmclient.h"
 #include "secrets.h"
 #include "specialkeysdialog.h"
+#include "tuiclient.h"
 #include "videopipeline.h"
 #include "videowindow.h"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
 #include <QCommandLineParser>
 #include <QDateTime>
@@ -260,6 +262,13 @@ int main(int argc, char** argv) {
     if (pasteHotkey.isEmpty()) {
         pasteHotkey = QStringLiteral("Ctrl+Alt+Shift+V");
     }
+    QString regionHotkey = cfg.region_hotkey;
+    if (regionHotkey.isEmpty()) {
+        regionHotkey = QStringLiteral("Ctrl+Alt+Shift+C");
+    }
+    const CaptureHotkeys hotkeys{releaseHotkey, fullscreenHotkey,
+                                 specialKeysHotkey, pasteHotkey,
+                                 regionHotkey};
     const QString onlyHost = parser.value(onlyOpt);
 
     // ------------------------------------------------------------------
@@ -302,8 +311,7 @@ int main(int argc, char** argv) {
         inst.window->setConnectionStatus(QStringLiteral("%1: authenticating…")
                                              .arg(inst.host));
         inst.window->setCaptureContext(inst.monitorRect, cfg.logical_desktop,
-                                       releaseHotkey, fullscreenHotkey,
-                                       specialKeysHotkey, pasteHotkey);
+                                       hotkeys);
         inst.window->setPersistenceHost(inst.host);
         inst.window->setCursorMarker(cfg.video.cursor_marker,
                                      cfg.video.cursor_marker_color,
@@ -371,6 +379,48 @@ int main(int argc, char** argv) {
         return 2;
     }
     auto* router = new InputRouter(master->pk, &app);
+
+    // Region capture → Tui → clipboard. One client for every window. The
+    // API key is a `secret://` reference resolved here, so it never has to
+    // sit in config.yaml.
+    TuiClient::Options tuiOpts;
+    tuiOpts.endpoint        = cfg.ocr.endpoint;
+    tuiOpts.model           = cfg.ocr.model;
+    tuiOpts.reasoningEffort = cfg.ocr.reasoning_effort;
+    tuiOpts.maxTokens       = cfg.ocr.max_tokens;
+    tuiOpts.timeoutMs       = cfg.ocr.timeout_ms;
+    if (cfg.ocr.api_key.isEmpty()) {
+        qCInfo(lcOcr) << "ocr.api_key unset; region capture will select but"
+                      << "not extract";
+    } else if (const auto key = SecretResolver::resolve(cfg.ocr.api_key)) {
+        tuiOpts.apiKey = *key;
+    } else {
+        qCWarning(lcOcr) << "ocr.api_key could not be resolved:"
+                         << cfg.ocr.api_key;
+    }
+    auto* tui = new TuiClient(tuiOpts, &app);
+
+    // Both of these report back on the window that asked, which is the
+    // one the pointer was over — not necessarily the one with focus.
+    auto regionRequester = std::make_shared<QPointer<VideoWindow>>();
+    QObject::connect(tui, &TuiClient::finished, &app,
+        [regionRequester](bool ok, const QString& text, const QString& error) {
+            VideoWindow* w = *regionRequester;
+            if (w) w->clearBusy();
+            if (!ok) {
+                if (w) w->flashStatus(
+                    error == QStringLiteral("cancelled")
+                        ? QStringLiteral("extraction cancelled")
+                        : QStringLiteral("extract failed: %1").arg(error),
+                    8000);
+                return;
+            }
+            if (QClipboard* cb = QGuiApplication::clipboard()) {
+                cb->setText(text);
+            }
+            if (w) w->flashStatus(
+                QStringLiteral("copied %1 chars to clipboard").arg(text.size()));
+        });
 
     // Clipboard paste runs on the HID master but is triggered from, and
     // reported on, whichever window had focus — so remember who asked.
@@ -577,6 +627,41 @@ int main(int argc, char** argv) {
                          router, &InputRouter::routeMouseWheel);
         QObject::connect(inst.window, &VideoWindow::keyEvent,
                          router, &InputRouter::routeKey);
+
+        // Region capture: the window hands back a crop of its frozen
+        // frame; we encode and send it. PNG rather than JPEG so text
+        // edges stay crisp for the model, and a 1920x1080 frame is 2.07 MP
+        // — just under Tui's ~2.1 MP downscale threshold, so a full-frame
+        // selection survives at native resolution.
+        QObject::connect(inst.window, &VideoWindow::regionCaptured, inst.window,
+                         [&inst, tui, &cfg, regionRequester](const QImage& image) {
+            if (!tui->configured()) {
+                inst.window->flashStatus(QStringLiteral(
+                    "region capture: set ocr.api_key to extract text"), 8000);
+                return;
+            }
+            QByteArray png;
+            QBuffer buf(&png);
+            buf.open(QIODevice::WriteOnly);
+            if (!image.save(&buf, "PNG")) {
+                qCWarning(lcOcr) << "region capture: PNG encode failed for"
+                                 << image.size();
+                inst.window->flashStatus(
+                    QStringLiteral("region capture: could not encode image"));
+                return;
+            }
+            buf.close();
+
+            *regionRequester = inst.window;
+            inst.window->setBusy(QStringLiteral("extracting %1×%2")
+                                     .arg(image.width()).arg(image.height()));
+            tui->extractText(png, cfg.ocr.prompt);
+        });
+
+        // A second region hotkey press while the spinner is up abandons
+        // the request rather than queueing another.
+        QObject::connect(inst.window, &VideoWindow::busyCancelRequested,
+                         tui, &TuiClient::cancel);
 
         // Paste hotkey: type the host clipboard onto the target via the
         // HID master's server-side keymap. Text only. Pressing the hotkey
