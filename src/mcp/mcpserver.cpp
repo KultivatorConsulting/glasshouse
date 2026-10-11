@@ -102,11 +102,17 @@ void McpServer::handleRequest(const QJsonObject& req,
         return;
     }
 
-    const auto ok = [id, &respond](const QJsonObject& result) {
+    // `respond` is captured by value, not by reference, and that is load
+    // bearing: a tool may answer long after this function has returned —
+    // toolMouseMove's settle timer and toolType's pasteFinished both do.
+    // A reference would dangle into a dead stack frame, and invoking the
+    // destroyed std::function throws bad_function_call with nothing to
+    // catch it, which aborts the viewer.
+    const auto ok = [id, respond](const QJsonObject& result) {
         respond(QJsonObject{{"jsonrpc", "2.0"}, {"id", id},
                             {"result", result}});
     };
-    const auto fail = [id, &respond](int code, const QString& message) {
+    const auto fail = [id, respond](int code, const QString& message) {
         respond(QJsonObject{{"jsonrpc", "2.0"}, {"id", id},
                             {"error", QJsonObject{{"code", code},
                                                   {"message", message}}}});

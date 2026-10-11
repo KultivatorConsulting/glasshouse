@@ -9,6 +9,7 @@
 // Anything that actually moves the pointer or types needs the live GUI and
 // is checked there.
 
+#include "mcphttpserver.h"
 #include "mcpserver.h"
 
 #include <QCoreApplication>
@@ -39,8 +40,9 @@ struct Reply {
 // test lives in this same thread, and the blocking waitFor* calls only
 // watch their own descriptor — they never run the event loop, so the
 // server's newConnection would never fire and every request would time out.
-Reply post(const QByteArray& body, const QByteArray& extraHeaders = {},
-           const QByteArray& method = "POST") {
+Reply postTo(quint16 port, const QByteArray& body,
+             const QByteArray& extraHeaders = {},
+             const QByteArray& method = "POST") {
     Reply r;
     QTcpSocket sock;
     QEventLoop loop;
@@ -67,7 +69,7 @@ Reply post(const QByteArray& body, const QByteArray& extraHeaders = {},
     QObject::connect(&guard, &QTimer::timeout, &loop, &QEventLoop::quit);
     guard.start(5000);
 
-    sock.connectToHost(QHostAddress::LocalHost, kPort);
+    sock.connectToHost(QHostAddress::LocalHost, port);
     loop.exec();
     all.append(sock.readAll());
     if (all.isEmpty()) return r;
@@ -80,6 +82,11 @@ Reply post(const QByteArray& body, const QByteArray& extraHeaders = {},
     r.body = all.mid(blank + 4);
     r.ok   = true;
     return r;
+}
+
+Reply post(const QByteArray& body, const QByteArray& extraHeaders = {},
+           const QByteArray& method = "POST") {
+    return postTo(kPort, body, extraHeaders, method);
 }
 
 QByteArray rpc(const char* method, const QJsonObject& params = {},
@@ -112,6 +119,7 @@ private slots:
     void inputToolsRefuseWithoutHidMaster();
     void getIsRejectedBecauseThereIsNoStream();
     void tokenIsEnforcedWhenConfigured();
+    void deferredResponseStillReachesTheClient();
 
 private:
     McpServer* m_srv = nullptr;
@@ -315,6 +323,40 @@ void TestMcpServer::tokenIsEnforcedWhenConfigured() {
                              "Authorization: Bearer s3cret\r\n");
     QVERIFY(right.ok);
     QCOMPARE(right.status, 200);
+}
+
+// A tool is allowed to answer after its request handler has returned —
+// toolMouseMove's settle timer and toolType's pasteFinished both do. This
+// pins the transport half of that contract: the socket has to still be
+// there, and the response has to still be written.
+//
+// It does not reach McpServer::handleRequest, whose responder is gated
+// behind hidReady() and so needs a connected PiKVM. That half was a
+// reference capture into a dead stack frame until 2026-10-12, which
+// aborted the viewer with bad_function_call; it is verified live.
+void TestMcpServer::deferredResponseStillReachesTheClient() {
+    constexpr quint16 kDeferPort = 18767;
+
+    McpHttpServer http;
+    http.setHandler([](const QJsonObject& req,
+                       McpHttpServer::Responder respond) {
+        const QJsonValue id = req.value(QStringLiteral("id"));
+        // By value, and fired well after this handler has returned.
+        QTimer::singleShot(50, [id, respond]() {
+            respond(QJsonObject{{"jsonrpc", "2.0"}, {"id", id},
+                                {"result", QJsonObject{{"late", true}}}});
+        });
+    });
+    QString err;
+    QVERIFY2(http.listen(QStringLiteral("127.0.0.1"), kDeferPort, &err),
+             qPrintable(err));
+
+    const Reply r = postTo(kDeferPort, rpc("ping"));
+    QVERIFY(r.ok);
+    QCOMPARE(r.status, 200);
+    QCOMPARE(bodyObject(r).value(QStringLiteral("result"))
+                          .toObject().value(QStringLiteral("late")).toBool(),
+             true);
 }
 
 QTEST_GUILESS_MAIN(TestMcpServer)
