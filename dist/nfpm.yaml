@@ -20,7 +20,7 @@ priority: optional
 
 maintainer: "Glasshouse Maintainers <developers@kultivator.co.nz>"
 vendor: "Kultivator Consulting"
-homepage: "https://github.com/kultivator-consulting/glasshouse"
+homepage: "https://github.com/KultivatorConsulting/glasshouse"
 license: LGPL-3.0
 description: |
   Multi-screen PiKVM desktop client.

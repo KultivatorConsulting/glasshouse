@@ -1,14 +1,27 @@
 cmake_minimum_required(VERSION 3.22)
-project(glasshouse LANGUAGES CXX VERSION 0.1.0)
+project(glasshouse LANGUAGES CXX VERSION 0.1.3)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Compile-time version string for the About box and any other UI surface
-# that wants to report what's running. The project() VERSION above is
-# the source of truth.
-add_compile_definitions(GLASSHOUSE_VERSION="${PROJECT_VERSION}")
+# that wants to report what's running.
+#
+# The packaged version is computed from git by CI — the tag for a release,
+# `0.0.0+sha.<short>` otherwise, which deliberately sorts below any release
+# so a branch build never looks newer than one. CI passes that same string
+# in as GLASSHOUSE_VERSION so a shipped binary reports exactly what the
+# .deb says it is; before this the About box reported project() while the
+# package reported the tag, and the two had drifted apart.
+#
+# project() VERSION above is only the fallback for a local build that
+# passes no override. Keep it at the most recent tag.
+if(NOT GLASSHOUSE_VERSION)
+    set(GLASSHOUSE_VERSION "${PROJECT_VERSION}")
+endif()
+add_compile_definitions(GLASSHOUSE_VERSION="${GLASSHOUSE_VERSION}")
+message(STATUS "Glasshouse version string: ${GLASSHOUSE_VERSION}")
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)

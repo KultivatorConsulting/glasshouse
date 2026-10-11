@@ -246,8 +246,8 @@ void VideoWindow::buildMenuBar() {
             QStringLiteral(
                 "<b>Glasshouse Viewer</b> %1<br><br>"
                 "Native Linux PiKVM client.<br><br>"
-                "<a href=\"https://github.com/kultivator-consulting/glasshouse\">"
-                "github.com/kultivator-consulting/glasshouse</a>")
+                "<a href=\"https://github.com/KultivatorConsulting/glasshouse\">"
+                "github.com/KultivatorConsulting/glasshouse</a>")
                 .arg(QApplication::applicationVersion()));
     });
 }

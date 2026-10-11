@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`--version`.** Prints the compiled version string and exits. Long
+  form only: `-v` is already `--verbose`. Added because "is the installed
+  package the code I am looking at" had no quick answer.
+
 ### Changed
 - **`VideoWindow::setCaptureContext` takes a `CaptureHotkeys` struct**
   instead of five adjacent `QString` parameters. Two transposed hotkeys
@@ -20,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enable debug logging without setting the env var.
 
 ### Fixed
+- **Every link to the repository was a 404.** The URLs said
+  `kultivator-consulting`; the organisation is `KultivatorConsulting`.
+  Nine occurrences, including the About box link, the `homepage` field
+  shipped in the package metadata, the README Releases link and the
+  CONTRIBUTING issues link.
+- **The About box reported a different version from the package.** The
+  version string was compiled from `project(... VERSION)` in
+  `CMakeLists.txt`, which had never been bumped past `0.1.0`, while the
+  `.deb` took its version from the git tag. CI now determines the version
+  before configuring and passes it in as `GLASSHOUSE_VERSION`, so a
+  packaged binary reports exactly what the package says; `project()`
+  remains the fallback for a local build with no override.
 - **Pastes over 1024 characters could arrive scrambled.** `pasteText`
   split the text into chunks at the server's per-request limit but posted
   them all from a tight loop; Qt opens up to six connections per host, so
@@ -295,8 +312,8 @@ PiKVM web UIs" pattern for managing remote target machines.
   shared source of truth between the Special Keys palette and a
   future keypad daemon, but the daemon itself is separate work.
 
-[Unreleased]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.2...v0.1.3
-[0.1.2]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/kultivator-consulting/glasshouse/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/kultivator-consulting/glasshouse/releases/tag/v0.1.0
+[Unreleased]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/KultivatorConsulting/glasshouse/releases/tag/v0.1.0

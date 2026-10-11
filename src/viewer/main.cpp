@@ -51,6 +51,12 @@ void errln(const QString& s) {
     err.flush();
 }
 
+void outln(const QString& s) {
+    QTextStream out(stdout);
+    out << s << '\n';
+    out.flush();
+}
+
 // Startup-failure announcer. errln so the message lands on stderr for
 // terminal launches, plus a modal QMessageBox so a desktop launch
 // (KDE menu, .desktop double-click) actually surfaces the reason —
@@ -208,11 +214,26 @@ int main(int argc, char** argv) {
         {QStringLiteral("v"), QStringLiteral("verbose")},
         QStringLiteral("Enable debug logging for all glasshouse.* categories "
                        "(same as QT_LOGGING_RULES='glasshouse.*.debug=true')."));
+    // Long form only: addVersionOption() would also claim `-v`, which
+    // --verbose owns, and Qt warns on every startup when it collides.
+    // Prints setApplicationVersion() — the string CI compiles in from the
+    // same value the .deb carries, since the two have disagreed before.
+    QCommandLineOption versionOpt(
+        QStringList{QStringLiteral("version")},
+        QStringLiteral("Display the version and exit."));
     parser.addOption(configOpt);
     parser.addOption(onlyOpt);
     parser.addOption(logFileOpt);
     parser.addOption(verboseOpt);
+    parser.addOption(versionOpt);
     parser.process(app);
+
+    if (parser.isSet(versionOpt)) {
+        outln(QStringLiteral("%1 %2")
+                  .arg(QCoreApplication::applicationName(),
+                       QCoreApplication::applicationVersion()));
+        return 0;
+    }
 
     // Wire file logging early so config-load failures land in the file too.
     if (const QString logFilePath = parser.value(logFileOpt);

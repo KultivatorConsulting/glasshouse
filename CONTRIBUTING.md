@@ -15,7 +15,7 @@ keymap).
 ## Where to start
 
 - **Bug reports.** Open a [GitHub
-  issue](https://github.com/kultivator-consulting/glasshouse/issues).
+  issue](https://github.com/KultivatorConsulting/glasshouse/issues).
   Include your kvmd / ustreamer version (`kvmd --version` on the
   PiKVM), distro and Qt version on the client, and the failing flow's
   log if you can capture one:
@@ -52,7 +52,7 @@ keymap).
 Tag-driven via `.github/workflows/release.yml`. Push a `v<semver>`
 annotated tag on `main`; the workflow builds and publishes the `.deb`
 to the [Releases
-page](https://github.com/kultivator-consulting/glasshouse/releases).
+page](https://github.com/KultivatorConsulting/glasshouse/releases).
 Untagged pushes to `main` produce a `0.0.0+sha.<short>` artifact via
 `build.yml` (CI artifact only — not auto-installed).
 

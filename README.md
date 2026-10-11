@@ -57,7 +57,7 @@ list.
 ## Install (from a release `.deb`)
 
 Tagged releases publish a `.deb` to the
-[Releases page](https://github.com/kultivator-consulting/glasshouse/releases).
+[Releases page](https://github.com/KultivatorConsulting/glasshouse/releases).
 Download `glasshouse-viewer_<version>_amd64.deb` and install with:
 
 ```bash

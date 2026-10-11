@@ -49,15 +49,8 @@ jobs:
             libx11-dev \
             libxfixes-dev
 
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
+      # Before Configure, not after: the version is compiled into the
+      # binary for the About box, so it has to be known at configure time.
       - name: Determine version
         id: version
         run: |
@@ -68,6 +61,17 @@ jobs:
           fi
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
           echo "Building package version ${ver}"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DGLASSHOUSE_VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
       - name: Install nfpm
         run: |
