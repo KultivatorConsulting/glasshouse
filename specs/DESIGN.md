@@ -569,6 +569,14 @@ the few events worth chasing the user over.
 Phases 8 and 9 turn out to be its primitives: `/api/hid/print` is the
 act path, and region capture is the observe path.
 
+**Only part of it belongs to this repository.** The watcher engine and
+the MCP server must live in the viewer — detection runs on every decoded
+frame, so a process boundary would mean moving frames across IPC — and
+neither depends on Kahu. The Tauri shell and the proprietary Kahu
+backend ship as a separate private package, `glasshouse-harness`,
+depending on this one. HARNESS.md §9 has the split and why the licence
+alone would force it.
+
 Design captured separately in **[HARNESS.md](HARNESS.md)** — it is
 architecture for unbuilt work, and this document records what exists.
 

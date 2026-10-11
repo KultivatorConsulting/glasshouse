@@ -1,9 +1,9 @@
 # Glasshouse harness — design
 
 Status: **proposed, unbuilt.** Captured 2026-10-11 from a design
-discussion; §5.4 added 2026-10-12. Nothing here is implemented; the
-pieces it depends on (region capture, clipboard paste) are. See
-DESIGN.md §10.9 / §10.10.
+discussion; §5.4 and the §9–§10 decisions added 2026-10-12. Nothing
+here is implemented; the pieces it depends on (region capture, clipboard
+paste) are. See DESIGN.md §10.9 / §10.10.
 
 ---
 
@@ -210,15 +210,35 @@ would spend the one resource already under pressure — two active streams
 sit near 133% CPU (DESIGN.md §10.3). Compression belongs at the point of
 transmission, where the frame count is in single digits.
 
+**Sizing, with ten watchers as the stated ceiling.** One knob: 16 MB per
+volatile watcher, letting the region's size decide the depth rather than
+configuring a frame count. At 135 KB a frame that is about 120 retained
+frames, several complete toast lifecycles. A 96 MB global pool across
+all volatile watchers bounds the worst case, and at the four or five
+that are realistic it is never approached.
+
+The area ceiling then falls out of that budget instead of being a second
+number to keep consistent with the first. Require a minimum useful depth
+of 30 retained frames, and 16 MB / 30 is about 533 KB a frame — roughly
+0.17 MP, some 500x350. Generous for a toast or a tray badge, and it
+refuses anything window-sized.
+
 Frames carry wall-clock timestamps rather than only frame indexes. "A
 message arrived" is far less useful than "a message arrived at 14:32",
 and the motivating case is explicitly about returning to a machine after
 being away from it.
 
-A second, decimated lane — one frame every couple of seconds across the
-last few minutes — answers "what happened while I was away" as opposed
-to "what just happened". With change-based retention it is nearly free
-on a quiet region.
+**A second, decimated lane is deferred.** One frame every couple of
+seconds across the last few minutes would answer "what happened while I
+was away" as opposed to "what just happened", and with change-based
+retention it would be nearly free on a quiet region. But it is a second
+retention policy and a second eviction path, and §8 already answers the
+question it was for: the conversation is the inbox, so what happened
+while the user was away sits in the assistant's persisted message, not
+in replayed frames. The hot ring has the narrower job of letting the
+model read a toast that has already gone. Build that, and add the cold
+lane only if a question turns up that the hot ring demonstrably cannot
+answer.
 
 #### Getting a timeseries past a four-image limit
 
@@ -242,8 +262,10 @@ is what turns "it has context on what has been going on" into a property
 of the system instead of a hope about conversation length.
 
 **The footgun is a large volatile region.** Full-screen at frame rate is
-roughly 6 MB per frame, so the flag needs an area ceiling, above which a
-watcher is forced into the decimated lane whatever it was marked.
+roughly 6 MB per frame — 44 frames would exhaust the entire global pool.
+Above the ceiling, volatile is **refused rather than silently
+degraded**: the watcher still works, it simply keeps no history, and the
+user is told which of the two they got.
 
 ## 6. Local vision: OpenCV
 
@@ -272,9 +294,13 @@ system instead of a model that already works.
 ## 7. Kahu integration
 
 Kahu is a toolkit for building harnesses, with Tui as the model backend;
-it reaches tools over MCP (§3). Its UI is Vue, so embedding means either
-a web view (the user's preference: "Tauri or something") or a native Qt
-client speaking `contract/PROTOCOL.md`. **Not yet decided** — see §9.
+it reaches tools over MCP (§3). Its UI is Vue, so embedding it means a
+web view rather than a native Qt client against `contract/PROTOCOL.md`:
+porting the Vue kit to Qt is a large undertaking for what is, today, a
+single tool used on one client. Revisit only if others adopt it.
+
+**Decided 2026-10-12: Tauri, not QtWebEngine.** This inverts the
+expected order, on evidence rather than taste — see §10.
 
 **Kahu has no server-initiated messages.** Per `contract/PROTOCOL.md`
 §1, "the stream is opened by the request": every exchange begins with a
@@ -310,21 +336,129 @@ on the session and Qt's DBus module is already in the build Qt. A
 notification can carry an action, so it should open straight to that
 conversation rather than merely saying something happened.
 
-## 9. Open questions
+## 9. Where the code lives: public viewer, private harness
 
-* **UI shell.** Web view (Tauri or QtWebEngine) versus a native Qt
-  client against `contract/PROTOCOL.md`. QtWebEngine means Chromium in a
-  `.deb` whose client links system Qt 6.4. Read the protocol spec before
-  choosing.
-* **Where the backend runs.** `docker compose` on the workstation, a
-  local Go binary, or remote. Live mode needs `TUI_API_KEY`.
-* **Watcher persistence format**, and how many are realistic before the
-  per-frame comparisons stop being free.
-* **The per-watcher byte budget** for §5.4 buffers, the area ceiling
-  above which volatile is refused, and whether the decimated lane is
-  worth building at the same time as the hot one.
+Glasshouse is LGPL-3.0 and public (`github.com/KultivatorConsulting/`);
+Kahu is proprietary and lives on `git.kultivator.net.nz`. Shipping a
+Kahu backend inside `glasshouse-viewer` would put a proprietary payload
+in a package that declares LGPL-3.0. So the harness is a **separate
+private repository and a separate package**, `glasshouse-harness`,
+depending on `glasshouse-viewer`.
 
-## 10. Privacy posture
+**The split line is partly forced, not a matter of taste.** Detection
+runs on every decoded frame against `QVideoSink` / the FrameMailbox.
+Behind a process boundary that would mean moving 6 MB x ~27 fps x 2
+streams across IPC, so the watcher engine is structurally part of the
+viewer. The MCP server follows the same logic: it exists to speak for
+the whole session — screen indexes, combined desktop, HID-master
+routing — so it must live where that state is. Neither has any Kahu
+dependency, and OpenCV is Apache-2.0, which sits fine under LGPL-3.0.
+
+| public `glasshouse-viewer` | private `glasshouse-harness` |
+|---|---|
+| watcher registry, ring buffers, OpenCV detection | Tauri shell hosting `chat-vue` |
+| MCP server (screens, desktop, HID, frame queries) | Kahu Go backend |
+| the trigger / event-out layer, consumer-agnostic | the §7 turn-opening logic |
+
+This is worth wanting for its own sake, not just for the licence: the
+public repo stays complete. Someone cloning it gets watchers and an MCP
+server they can point at their own agent — Claude Code, anything
+OpenAI-compatible. What is proprietary is the particular Kahu harness,
+not the capability. A viewer with a hole where the interesting feature
+used to be would be a worse artifact.
+
+### 9.1 The event-out layer is two mechanisms
+
+Pull is MCP: the agent asks for frames, screenshots, typed text.
+
+Push needs its own answer, and **launching is only half of it**:
+
+* **Launch with context** — the `Ctrl+Shift+Alt+H` hotkey starting a
+  third-party application and handing it the current context, exactly
+  as any other GUI program would be invoked. One-shot, stateless.
+* **Notify something already running** — a watcher fires hours after it
+  was set. Spawning a process per event either loses the accumulated
+  context that makes §8 work, or presumes the backend is already up, in
+  which case it was never a launch. This needs a persistent channel.
+
+MCP is JSON-RPC and carries notifications in both directions over an
+established session, so this should ride the transport already there
+rather than needing a second one. Confirm against the spec revision
+targeted before relying on it.
+
+**The discipline: the event-out stays generic.** The viewer emits
+"watcher W fired, here is the crop and the original intent" to whatever
+has subscribed, and knows nothing about the subscriber; launch-with-
+context is then one subscriber shape and a connected consumer the other.
+Let that surface become Kahu-shaped and the private repo starts needing
+viewer patches, which means lockstep releases — the split costing
+something instead of paying.
+
+### 9.2 Consequences
+
+* **Hosting.** `git.kultivator.net.nz:kultivator/glasshouse-harness`,
+  beside `kahu-harness`, with a Jenkinsfile on the same `Dockerfile.ci`
+  convention. A private `.deb` cannot ship from public GitHub Releases
+  anyway. Public CI stays C++/Qt; Go, Rust and Node all land private.
+* **Versioning.** `glasshouse-harness` will depend on
+  `glasshouse-viewer (>= X)`, which makes the `project(... VERSION
+  0.1.0)` that has never been bumped an actual problem rather than a
+  cosmetic wart in the About box. Fix it before there are two packages
+  to keep in step. The MCP surface needs versioning too, which MCP's
+  capability negotiation already provides.
+* **Secrets.** One file. The Tui key for §10.10 extraction already
+  resolves through `SecretResolver` from
+  `~/.config/glasshouse/secrets.yaml`, so the harness adds a key there
+  rather than inventing a second store.
+
+## 10. Decisions, and what is still open
+
+Settled 2026-10-12.
+
+**UI shell: Tauri.** The `.deb` builds against noble's system Qt 6.4
+(`qt6-base-dev`, in all three workflows), so the only QtWebEngine it can
+depend on is noble's `6.4.2` — Chromium 102, from 2022. Kahu states a
+floor in `docs/using/vue.md` as of 2026-09-03, and the **Popover API**
+is on it, described there as "doing real work, not saving a few lines":
+the thread row's action menu needs the top layer to escape an
+`overflow-y: auto` list, and gets light dismiss and Escape for free.
+Popover shipped in Chromium 114; `chat-vue` also uses `:has()`, which is
+105+. So the menus would not open and the list would clip at its scroll
+edge — broken, not merely degraded.
+
+A current Chromium would mean bundling WebEngine from a newer Qt: the
+150 MB-in-a-`.deb` problem, plus a Qt version split inside one package.
+Tauri's engine clears the floor instead — noble carries WebKitGTK
+**2.52.6** in `main` with security updates, past the Safari 17 bar, and
+already installed on the workstation with its `-dev` package. Two
+incidental wins: `main` is better maintained than QtWebEngine's
+`universe`, and `rust/kahu-contract` already exists, so a Tauri shell's
+Rust side can use Kahu's own protocol crate rather than reimplement it.
+
+The cost is that the harness window is a separate process rather than a
+Qt widget, so integration with KDE window management is looser than a
+Glasshouse video window's. Acceptable for a chat window.
+
+**Backend: local, on the host.** A Go binary in the
+`glasshouse-harness` package (§9), spawned and owned by the viewer as a
+child process so nothing runs when Glasshouse is not, with `TUI_API_KEY`
+passed into its environment from the existing `SecretResolver`.
+
+**Watcher count: ten at the ceiling, four or five realistically.** That
+closes half of what used to be an open question — ten regions of a few
+thousand pixels at ~27 fps is nothing, so the per-frame comparisons stay
+free across the whole intended range. Buffer sizing follows from the
+same number; see §5.4.
+
+Still open:
+
+* **Watcher persistence format.** Where the registry lives across
+  restarts, and whether a stale rectangle re-locates eagerly on startup
+  or lazily on first miss.
+* **Whether MCP notifications carry the push direction** (§9.1), which
+  decides if a second channel is needed at all.
+
+## 11. Privacy posture
 
 This is a real change and should not be allowed to go stale.
 
