@@ -522,6 +522,12 @@ configurable hotkey (default `Ctrl+Alt+K`). Three tabs:
   knobs for picky BIOS prompts. Server-side keymap conversion applies,
   so the *target's* layout is what determines what gets typed.
 
+A configurable hotkey (`paste_hotkey`, default `Ctrl+Alt+Shift+V`)
+drives the same endpoint straight from the host clipboard, which is
+the common case and avoids dropping the capture to visit a dialog.
+See §10.9 for why the modifiers have to be released first and why
+the chunks have to be sequenced.
+
 Routing goes through the same `InputRouter` as the rest of HID, so
 the dialog targets the configured HID master regardless of which
 window had focus when it was opened. Opening the palette releases
@@ -917,6 +923,68 @@ it is a heuristic — it can't reproduce gaps, vertical alignment when heights
 differ, or any reordering. Deferred in favour of saying clearly what
 changed.
 
+### 10.9 Clipboard paste by hotkey (verified 2026-10-11)
+
+`POST /api/hid/print` already did the hard part — kvmd types a UTF-8 body
+through the target's own server-side keymap, so the client needs no
+character-to-scancode table and no pacing loop. Driving it from a hotkey
+instead of a dialog surfaced three things that the dialog had hidden.
+
+**The chord's own modifiers are held down on the target.** Pressing
+`Ctrl+Alt+Shift+V` while captured means those three key-downs have already
+been forwarded, and kvmd has no idea the client is about to ask it to type.
+Left alone, the whole clipboard arrives as `Ctrl+Alt+Shift` chords. The fix
+is the blanket modifier release `stopCapture()` already used for the
+mid-chord case (eight `…Left`/`…Right` key-ups, no-ops server-side if the
+key wasn't down), now shared as `releaseHeldModifiers()`.
+
+**Which route delivers the hotkey depends on whether the grab took.** Two
+paths can reach it: the `QShortcut` installed in `setCaptureContext`, and
+`handleKey` via the event filter. The existing hotkeys tolerate either, and
+tolerate *both*, because toggling fullscreen or a dialog twice is a no-op.
+Paste is not idempotent — a second request is the abort — so route matters.
+Measured with a harness driving the real `VideoWindow` through
+`QWindowSystemInterface`: exactly one of the two fires in each state, the
+`QShortcut` while uncaptured and `handleKey` once `grabKeyboard` is active.
+But the harness runs offscreen, where the grab is a silent no-op, and there
+the `QShortcut` won *while captured* — skipping the modifier release. Rather
+than depend on the grab having taken, both routes now call
+`requestClipboardPaste()`, which owns the release. Verified order while
+captured:
+
+| | emitted |
+|---|---|
+| chord down | `ControlLeft↓ AltLeft↓ ShiftLeft↓` |
+| hotkey recognised | `ShiftLeft↑ ShiftRight↑ ControlLeft↑ ControlRight↑ AltLeft↑ AltRight↑ MetaLeft↑ MetaRight↑` |
+| then | paste requested |
+
+The `V` itself is swallowed, never forwarded.
+
+**The chunks raced.** The server caps a request at 1024 characters, so longer
+text is split — but the original loop posted every chunk immediately. Qt
+opens up to six connections per host, so the chunks ran their TLS handshakes
+in parallel and reached kvmd in completion order, not send order. Sequencing
+each chunk from the previous one's `finished` handler fixes the ordering and
+incidentally provides the cancel point, so a second hotkey press can abort a
+long paste. Note that abort stops the remaining chunks; whatever already
+reached the HID stays typed.
+
+**Two transports, no ordering guarantee between them.** The modifier key-ups
+go out on the state WebSocket; the paste is an HTTPS POST. Nothing orders a
+message on one socket against a request on the other, and losing that race
+reintroduces the chord problem. The WebSocket is long-established and
+realistically always wins, but the paste is deferred by 50 ms anyway —
+imperceptible against a human keypress, and cheaper than the failure.
+
+**Not done: a confirmation dialog.** A large accidental paste is
+irreversible, which argues for confirming first. A modal dialog is the wrong
+instrument here: raised while the video widget holds `grabMouse`/
+`grabKeyboard`, it cannot be clicked or dismissed, which is a worse failure
+than the one it prevents. Abort-on-second-press plus a character count in the
+status bar covers the same ground without touching the grab — and grab churn
+is the change class that froze input twice during the confinement work
+(§10.3, `capture_cursor_confinement`).
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
@@ -927,6 +995,8 @@ changed.
 | HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
 | Dock disconnect re-orders target monitors | open (detected indirectly) | A reordering is invisible to the client (§10.8); the resolution-mismatch warning is the nearest signal. Manual reassignment in config |
 | Target display settings change resolution | **resolved (detected)** | §10.8 — status-bar resolution readout plus an INFO/WARNING split on whether the mapping is actually affected |
+| Clipboard text the target keymap can't type | **resolved (mitigated)** | §10.9 — common Unicode punctuation folded to ASCII, CRLF normalised, remainder dropped with a count shown; kvmd discards it silently otherwise |
+| Runaway clipboard paste into a live target | open (bounded) | §10.9 — chunks are sequenced so a second hotkey press aborts the remainder; what already reached the HID stays typed |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
 | `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |
 

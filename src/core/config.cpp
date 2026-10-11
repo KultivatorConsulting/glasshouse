@@ -176,6 +176,7 @@ ConfigResult loadConfig(const QString& path) {
     cfg.release_hotkey      = yamlString(root, "release_hotkey");
     cfg.fullscreen_hotkey   = yamlString(root, "fullscreen_hotkey");
     cfg.special_keys_hotkey = yamlString(root, "special_keys_hotkey");
+    cfg.paste_hotkey        = yamlString(root, "paste_hotkey");
 
     // shortcuts list — optional. Each entry: {label: "...", keys: [...]}.
     if (const auto sc = root["shortcuts"]; sc && sc.IsSequence()) {

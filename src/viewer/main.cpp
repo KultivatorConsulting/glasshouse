@@ -5,6 +5,7 @@
 #include "config.h"
 #include "input_router.h"
 #include "janusclient.h"
+#include "keymap.h"
 #include "logging.h"
 #include "mjpegpipeline.h"
 #include "msddialog.h"
@@ -15,12 +16,14 @@
 #include "videowindow.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QIcon>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPointer>
 #include <QSettings>
 #include <QStandardPaths>
@@ -253,6 +256,10 @@ int main(int argc, char** argv) {
     if (specialKeysHotkey.isEmpty()) {
         specialKeysHotkey = QStringLiteral("Ctrl+Alt+K");
     }
+    QString pasteHotkey = cfg.paste_hotkey;
+    if (pasteHotkey.isEmpty()) {
+        pasteHotkey = QStringLiteral("Ctrl+Alt+Shift+V");
+    }
     const QString onlyHost = parser.value(onlyOpt);
 
     // ------------------------------------------------------------------
@@ -296,7 +303,7 @@ int main(int argc, char** argv) {
                                              .arg(inst.host));
         inst.window->setCaptureContext(inst.monitorRect, cfg.logical_desktop,
                                        releaseHotkey, fullscreenHotkey,
-                                       specialKeysHotkey);
+                                       specialKeysHotkey, pasteHotkey);
         inst.window->setPersistenceHost(inst.host);
         inst.window->setCursorMarker(cfg.video.cursor_marker,
                                      cfg.video.cursor_marker_color,
@@ -364,6 +371,27 @@ int main(int argc, char** argv) {
         return 2;
     }
     auto* router = new InputRouter(master->pk, &app);
+
+    // Clipboard paste runs on the HID master but is triggered from, and
+    // reported on, whichever window had focus — so remember who asked.
+    auto pasteRequester = std::make_shared<QPointer<VideoWindow>>();
+
+    QObject::connect(master->pk, &PiKvmClient::pasteProgress, &app,
+        [pasteRequester](int sent, int total) {
+            // Single-chunk pastes complete before this is worth drawing;
+            // the interesting case is a long one the user may want to stop.
+            if (total <= 1024 || !*pasteRequester) return;
+            (*pasteRequester)->flashStatus(
+                QStringLiteral("pasting %1/%2 chars — hotkey aborts")
+                    .arg(sent).arg(total), 30000);
+        });
+    QObject::connect(master->pk, &PiKvmClient::pasteFinished, &app,
+        [pasteRequester](bool ok, const QString& reason) {
+            if (!*pasteRequester) return;
+            (*pasteRequester)->flashStatus(
+                ok ? QStringLiteral("paste done")
+                   : QStringLiteral("paste: %1").arg(reason));
+        });
 
     // One special-keys palette shared across all windows. Toggle is
     // per-window (any window's hotkey shows/hides the same dialog).
@@ -549,6 +577,56 @@ int main(int argc, char** argv) {
                          router, &InputRouter::routeMouseWheel);
         QObject::connect(inst.window, &VideoWindow::keyEvent,
                          router, &InputRouter::routeKey);
+
+        // Paste hotkey: type the host clipboard onto the target via the
+        // HID master's server-side keymap. Text only. Pressing the hotkey
+        // again while a long paste is still running aborts the rest — the
+        // abort lives here rather than behind a confirmation dialog on the
+        // way in, because a modal dialog raised while the video widget
+        // holds grabMouse/grabKeyboard cannot be clicked or dismissed.
+        QObject::connect(inst.window, &VideoWindow::pasteClipboardRequested,
+                         inst.window, [&inst, master, router, pasteRequester]() {
+            *pasteRequester = inst.window;
+
+            if (master->pk->pasteBusy()) {
+                master->pk->cancelPaste();
+                return;
+            }
+
+            const QClipboard* cb = QGuiApplication::clipboard();
+            const QMimeData*  md = cb ? cb->mimeData() : nullptr;
+            if (!md || !md->hasText()) {
+                qCInfo(lcHid) << "paste: clipboard holds no text";
+                inst.window->flashStatus(
+                    QStringLiteral("paste: clipboard holds no text"));
+                return;
+            }
+
+            int dropped = 0;
+            const QString text = sanitiseForPrint(cb->text(), &dropped);
+            if (text.isEmpty()) {
+                qCWarning(lcHid) << "paste: nothing in the clipboard is"
+                                 << "typeable on the target keymap";
+                inst.window->flashStatus(
+                    QStringLiteral("paste: nothing typeable in clipboard"));
+                return;
+            }
+
+            inst.window->flashStatus(
+                dropped == 0
+                    ? QStringLiteral("pasting %1 chars…").arg(text.size())
+                    : QStringLiteral("pasting %1 chars (%2 unsupported "
+                                     "dropped)…").arg(text.size()).arg(dropped));
+
+            // The modifier key-ups VideoWindow just sent went out on the
+            // state WebSocket; this paste goes over HTTPS. Two sockets, no
+            // ordering guarantee between them — and losing that race means
+            // kvmd types the whole clipboard while it still believes
+            // Ctrl+Alt+Shift are held. A short gap is cheap insurance.
+            QTimer::singleShot(50, router, [router, text]() {
+                router->routeTypeText(text, /*slow=*/false, /*delayMs=*/0);
+            });
+        });
 
         // Capture is session-wide; whichever window the user clicked
         // becomes the holder, but the badge follows the cursor so it marks

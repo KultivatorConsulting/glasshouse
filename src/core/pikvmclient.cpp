@@ -511,10 +511,19 @@ void PiKvmClient::atxClick(const QString& button) {
 
 void PiKvmClient::pasteText(const QString& text, bool slow, int delayMs) {
     if (text.isEmpty()) return;
+    if (pasteBusy()) {
+        qCWarning(lcHid) << m_opts.host << "pasteText: paste already in flight";
+        emit pasteFinished(false, QStringLiteral("a paste is already in flight"));
+        return;
+    }
 
-    // The server accepts up to `limit` chars per request (default 1024).
-    // For longer pastes we split — each chunk is its own POST so the
-    // server can keep its rate-limiter happy.
+    // The server accepts up to `limit` chars per request (default 1024), so
+    // longer text has to be split. The chunks must then go out strictly one
+    // at a time: Qt opens up to six connections per host, so posting them in
+    // a loop races their TLS handshakes against each other and the target
+    // receives the text scrambled. Each chunk is posted from the previous
+    // one's `finished` handler instead, which also gives cancelPaste() a
+    // point to cut in.
     constexpr qsizetype kChunk = 1024;
     const QByteArray utf8 = text.toUtf8();
     qsizetype offset = 0;
@@ -526,39 +535,94 @@ void PiKvmClient::pasteText(const QString& text, bool slow, int delayMs) {
             // continuation byte; back off until we hit a leading byte
             --take;
         }
-
-        QUrl url(QStringLiteral("https://%1/api/hid/print").arg(m_opts.host));
-        QUrlQuery q;
-        if (slow) q.addQueryItem(QStringLiteral("slow"), QStringLiteral("1"));
-        if (delayMs > 0) {
-            q.addQueryItem(QStringLiteral("delay"),
-                           QString::number(delayMs / 1000.0, 'f', 3));
-        }
-        // Server cap is 1024 by default; we chunk client-side already,
-        // but pass `limit` explicitly so the server returns a clear
-        // error if a future build lowers that default.
-        q.addQueryItem(QStringLiteral("limit"), QString::number(kChunk));
-        url.setQuery(q);
-
-        QNetworkRequest req(url);
-        req.setHeader(QNetworkRequest::ContentTypeHeader,
-                      QStringLiteral("text/plain; charset=utf-8"));
-
-        QNetworkReply* reply = m_nam->post(req, utf8.mid(offset, take));
-        if (m_opts.insecure_tls) {
-            connect(reply, &QNetworkReply::sslErrors,
-                    reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
-        }
-        connect(reply, &QNetworkReply::finished, reply, [reply, this]() {
-            reply->deleteLater();
-            if (reply->error() != QNetworkReply::NoError) {
-                qCWarning(lcHid) << m_opts.host << "pasteText failed:"
-                                 << reply->errorString();
-            }
-        });
-
+        m_pasteQueue.append(utf8.mid(offset, take));
         offset += take;
     }
+
+    m_pasteSlow       = slow;
+    m_pasteDelayMs    = delayMs;
+    m_pasteSentChars  = 0;
+    m_pasteTotalChars = int(text.size());
+    qCInfo(lcHid) << m_opts.host << "paste starting:" << m_pasteTotalChars
+                  << "chars in" << m_pasteQueue.size() << "chunk(s)";
+    sendNextPasteChunk();
+}
+
+void PiKvmClient::sendNextPasteChunk() {
+    if (m_pasteQueue.isEmpty()) {
+        qCInfo(lcHid) << m_opts.host << "paste complete:"
+                      << m_pasteSentChars << "chars";
+        emit pasteFinished(true, QString());
+        return;
+    }
+
+    const QByteArray chunk = m_pasteQueue.takeFirst();
+
+    QUrl url(QStringLiteral("https://%1/api/hid/print").arg(m_opts.host));
+    QUrlQuery q;
+    if (m_pasteSlow) q.addQueryItem(QStringLiteral("slow"), QStringLiteral("1"));
+    if (m_pasteDelayMs > 0) {
+        q.addQueryItem(QStringLiteral("delay"),
+                       QString::number(m_pasteDelayMs / 1000.0, 'f', 3));
+    }
+    // Server cap is 1024 by default; we chunk client-side already, but pass
+    // `limit` explicitly so the server returns a clear error if a future
+    // build lowers that default.
+    q.addQueryItem(QStringLiteral("limit"), QStringLiteral("1024"));
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader,
+                  QStringLiteral("text/plain; charset=utf-8"));
+
+    QNetworkReply* reply = m_nam->post(req, chunk);
+    m_pasteReply = reply;
+    if (m_opts.insecure_tls) {
+        connect(reply, &QNetworkReply::sslErrors,
+                reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+    }
+
+    const int chunkChars = int(QString::fromUtf8(chunk).size());
+    connect(reply, &QNetworkReply::finished, this, [this, reply, chunkChars]() {
+        reply->deleteLater();
+        if (m_pasteReply == reply) m_pasteReply = nullptr;
+
+        if (reply->error() == QNetworkReply::OperationCanceledError) {
+            return;   // cancelPaste() already cleared the queue and reported
+        }
+        if (reply->error() != QNetworkReply::NoError) {
+            const QString err = reply->errorString();
+            qCWarning(lcHid) << m_opts.host << "pasteText failed:" << err;
+            m_pasteQueue.clear();
+            emit pasteFinished(false, err);
+            return;
+        }
+
+        m_pasteSentChars += chunkChars;
+        emit pasteProgress(m_pasteSentChars, m_pasteTotalChars);
+        sendNextPasteChunk();
+    });
+}
+
+void PiKvmClient::cancelPaste() {
+    if (!pasteBusy()) return;
+
+    const int sent  = m_pasteSentChars;
+    const int total = m_pasteTotalChars;
+    m_pasteQueue.clear();
+    if (QNetworkReply* reply = m_pasteReply) {
+        m_pasteReply = nullptr;
+        reply->abort();   // `finished` fires with OperationCanceledError
+    }
+
+    qCInfo(lcHid) << m_opts.host << "paste aborted after" << sent
+                  << "of" << total << "chars";
+    emit pasteFinished(false, QStringLiteral("aborted after %1 of %2 chars")
+                                  .arg(sent).arg(total));
+}
+
+bool PiKvmClient::pasteBusy() const {
+    return !m_pasteQueue.isEmpty() || m_pasteReply != nullptr;
 }
 
 }  // namespace glasshouse

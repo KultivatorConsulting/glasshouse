@@ -228,12 +228,14 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
                                     const QSize& logicalDesktop,
                                     const QString& releaseHotkey,
                                     const QString& fullscreenHotkey,
-                                    const QString& specialKeysHotkey) {
+                                    const QString& specialKeysHotkey,
+                                    const QString& pasteHotkey) {
     m_targetMonitor     = targetMonitor;
     m_logicalDesktop    = logicalDesktop;
     m_releaseHotkey     = encodeHotkey(releaseHotkey);
     m_fullscreenHotkey  = encodeHotkey(fullscreenHotkey);
     m_specialKeysHotkey = encodeHotkey(specialKeysHotkey);
+    m_pasteHotkey       = encodeHotkey(pasteHotkey);
     if (m_releaseHotkey == 0 && !releaseHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable release_hotkey:" << releaseHotkey;
     }
@@ -242,6 +244,9 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
     }
     if (m_specialKeysHotkey == 0 && !specialKeysHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable special_keys_hotkey:" << specialKeysHotkey;
+    }
+    if (m_pasteHotkey == 0 && !pasteHotkey.isEmpty()) {
+        qCWarning(lcHid) << "unparseable paste_hotkey:" << pasteHotkey;
     }
 
     // Pre-capture path: while no widget has Qt's keyboard grab, the
@@ -258,6 +263,12 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
         sc->setContext(Qt::WindowShortcut);
         connect(sc, &QShortcut::activated,
                 this, &VideoWindow::showSpecialKeysRequested);
+    }
+    if (m_pasteHotkey != 0) {
+        auto* sc = new QShortcut(QKeySequence(pasteHotkey), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated,
+                this, &VideoWindow::requestClipboardPaste);
     }
 }
 
@@ -413,13 +424,17 @@ void VideoWindow::startCapture() {
     qCInfo(lcHid) << "capture started";
 }
 
-void VideoWindow::stopCapture() {
-    if (!m_captured) return;
-    m_captured = false;
+void VideoWindow::requestClipboardPaste() {
+    // The chord's own modifiers are physically down right now, and while
+    // captured their key-downs have already been forwarded — so kvmd
+    // would type the entire clipboard as Ctrl+Alt+Shift chords. Let them
+    // go up first. Uncaptured there is nothing held on the target, so the
+    // release would just be eight pointless events.
+    if (m_captured) releaseHeldModifiers();
+    emit pasteClipboardRequested();
+}
 
-    // Best-effort release of any modifiers we may have left pressed on the
-    // target when the user hit the hotkey mid-chord. No-op on the server
-    // side if the modifier wasn't actually down.
+void VideoWindow::releaseHeldModifiers() {
     for (const auto& mod : {
             QStringLiteral("ShiftLeft"),  QStringLiteral("ShiftRight"),
             QStringLiteral("ControlLeft"),QStringLiteral("ControlRight"),
@@ -428,6 +443,19 @@ void VideoWindow::stopCapture() {
          }) {
         emit keyEvent(mod, /*pressed=*/false);
     }
+}
+
+void VideoWindow::flashStatus(const QString& text, int ms) {
+    statusBar()->showMessage(text, ms);
+}
+
+void VideoWindow::stopCapture() {
+    if (!m_captured) return;
+    m_captured = false;
+
+    // The user may have hit the release hotkey mid-chord, leaving
+    // modifiers held down on the target.
+    releaseHeldModifiers();
 
     m_video->releaseKeyboard();
     m_video->releaseMouse();
@@ -623,6 +651,10 @@ bool VideoWindow::handleKey(QKeyEvent* ev, bool pressed) {
         }
         if (m_specialKeysHotkey != 0 && combo == m_specialKeysHotkey) {
             emit showSpecialKeysRequested();
+            return true;
+        }
+        if (m_pasteHotkey != 0 && combo == m_pasteHotkey) {
+            requestClipboardPaste();
             return true;
         }
     }

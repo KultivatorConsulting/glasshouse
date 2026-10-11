@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enable debug logging without setting the env var.
 
 ### Fixed
+- **Pastes over 1024 characters could arrive scrambled.** `pasteText`
+  split the text into chunks at the server's per-request limit but posted
+  them all from a tight loop; Qt opens up to six connections per host, so
+  the chunks raced their TLS handshakes against each other and reached
+  kvmd in whatever order they finished. Chunks are now posted strictly one
+  at a time, each from the previous one's completion, which also makes the
+  paste abortable and reportable. Only reachable from the Special Keys
+  Paste tab before now, where the text is usually short.
 - **Mouse wheel only scrolled on the window that started the capture.**
   Qt routes `QWheelEvent` without consulting `QWidget::mouseGrabber()` —
   unlike mouse moves and buttons, which do honour the grab — so a scroll
@@ -53,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See DESIGN.md §10.2.
 
 ### Added
+- **Paste the host clipboard onto the target (`Ctrl+Alt+Shift+V`,
+  configurable via `paste_hotkey`).** Types the clipboard through the HID
+  master's `POST /api/hid/print`, so the target's own keymap decides what
+  gets typed — the same path the Special Keys palette's Paste tab already
+  used, now without opening a dialog (and so without dropping the capture
+  to do it). Text only: an image or empty clipboard is reported in the
+  status bar and dropped. Clipboard text is folded to what the server-side
+  `en_US` keymap can actually reach first — curly quotes, en/em dashes,
+  ellipses and non-break spaces become their ASCII equivalents, CRLF
+  collapses to LF (a surviving CR types a second Enter), and anything
+  still unreachable is dropped with a count shown to the user, because
+  kvmd discards it silently otherwise. Pressing the hotkey again while a
+  long paste is still running aborts the remainder. See DESIGN.md §10.9.
 - **Target layout drift warning.** The coord transform is purely
   proportional — only each monitor's share of the logical desktop reaches
   the wire — so a resolution change on the target is harmless when every

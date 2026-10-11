@@ -1,6 +1,8 @@
 #include "keymap.h"
 
+#include <QHash>
 #include <QKeyEvent>
+#include <QSet>
 
 namespace glasshouse {
 
@@ -153,6 +155,74 @@ QString keyEventToWire(const QKeyEvent& ev) {
     }
 
     return {};
+}
+
+QString sanitiseForPrint(const QString& in, int* droppedOut) {
+    // Unicode punctuation that has an unambiguous ASCII reading. Folding
+    // beats dropping here: a missing apostrophe corrupts a word silently,
+    // whereas "don't" typed as "don't" is exactly what the user meant.
+    static const QHash<char16_t, QString> kFold = {
+        {u'‘', QStringLiteral("'")},    // left single quote
+        {u'’', QStringLiteral("'")},    // right single quote / apostrophe
+        {u'‚', QStringLiteral("'")},    // single low-9 quote
+        {u'‛', QStringLiteral("'")},
+        {u'′', QStringLiteral("'")},    // prime
+        {u'“', QStringLiteral("\"")},   // left double quote
+        {u'”', QStringLiteral("\"")},   // right double quote
+        {u'„', QStringLiteral("\"")},   // double low-9 quote
+        {u'″', QStringLiteral("\"")},   // double prime
+        {u'«', QStringLiteral("\"")},   // guillemets
+        {u'»', QStringLiteral("\"")},
+        {u'–', QStringLiteral("-")},    // en dash
+        {u'—', QStringLiteral("--")},   // em dash
+        {u'―', QStringLiteral("--")},   // horizontal bar
+        {u'−', QStringLiteral("-")},    // minus sign
+        {u'…', QStringLiteral("...")},  // ellipsis
+        {u'•', QStringLiteral("*")},    // bullet
+        {u'·', QStringLiteral(".")},    // middle dot
+        {u' ', QStringLiteral(" ")},    // no-break space
+        {u' ', QStringLiteral(" ")},    // figure space
+        {u' ', QStringLiteral(" ")},    // thin space
+        {u' ', QStringLiteral(" ")},    // narrow no-break space
+    };
+    // Invisible formatting characters. Dropped without counting — they
+    // carry no visible text, so reporting them as losses would be noise.
+    static const QSet<char16_t> kSilent = {
+        u'﻿', u'​', u'‌', u'‍', u'⁠', u'­',
+    };
+
+    QString out;
+    out.reserve(in.size());
+    int dropped = 0;
+
+    for (qsizetype i = 0; i < in.size(); ++i) {
+        const char16_t u = in.at(i).unicode();
+
+        // CRLF collapses to LF, and a bare CR becomes one. Left alone, the
+        // CR types its own Enter and every pasted line arrives doubled.
+        if (u == u'\r') {
+            if (i + 1 < in.size() && in.at(i + 1) == u'\n') continue;
+            out.append(u'\n');
+            continue;
+        }
+        if (u == u'\n' || u == u'\t') {
+            out.append(in.at(i));
+            continue;
+        }
+        if (u >= 0x20 && u <= 0x7E) {   // printable ASCII: the en_US keymap
+            out.append(in.at(i));
+            continue;
+        }
+        if (const auto it = kFold.constFind(u); it != kFold.constEnd()) {
+            out.append(*it);
+            continue;
+        }
+        if (kSilent.contains(u)) continue;
+        ++dropped;
+    }
+
+    if (droppedOut) *droppedOut = dropped;
+    return out;
 }
 
 }  // namespace glasshouse

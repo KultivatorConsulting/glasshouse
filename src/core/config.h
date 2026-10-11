@@ -68,6 +68,7 @@ struct Config {
     QString                release_hotkey;
     QString                fullscreen_hotkey;
     QString                special_keys_hotkey;
+    QString                paste_hotkey;
     QList<ShortcutSpec>    shortcuts;       // optional, populates the palette
     VideoSpec              video;
     QList<WindowSpec>      windows;

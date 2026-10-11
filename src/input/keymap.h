@@ -23,4 +23,19 @@ namespace glasshouse {
 // drop — the server silently discards unknown names anyway.
 QString keyEventToWire(const QKeyEvent& ev);
 
+// Fold clipboard text down to what PiKVM's `POST /api/hid/print` can
+// actually type.
+//
+// kvmd types the request body through its server-side keymap (`en_US`
+// by default) and silently discards every character the keymap can't
+// reach. Text copied out of a browser is full of curly quotes and
+// en-dashes, so without this a paste loses characters mid-word with no
+// error reported anywhere. We fold the common Unicode punctuation to its
+// ASCII equivalent, normalise CRLF (a lone CR types a second Enter), drop
+// zero-width filler, and discard whatever is still unreachable.
+//
+// `droppedOut`, when non-null, receives the number of characters that
+// were discarded, so the caller can tell the user what didn't make it.
+QString sanitiseForPrint(const QString& in, int* droppedOut = nullptr);
+
 }  // namespace glasshouse

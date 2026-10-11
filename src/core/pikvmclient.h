@@ -2,13 +2,16 @@
 
 #include "pikvmevents.h"
 
+#include <QByteArray>
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QStringList>
 #include <memory>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 class QTimer;
 class QWebSocket;
 
@@ -73,9 +76,19 @@ public:
     // applying its configured server-side keymap (default `en_US`).
     // `slow=true` adds an inter-key delay (`delayMs`, 0–5000) for picky
     // BIOS prompts. Server caps the body at ~1024 chars by default; we
-    // chunk above that. Auth re-uses the cookie jar from the login
-    // session, so this only works after authenticated() has fired.
+    // chunk above that, posting one chunk at a time — see the ordering
+    // note in the implementation. Auth re-uses the cookie jar from the
+    // login session, so this only works after authenticated() has fired.
+    //
+    // Rejected (with pasteFinished(false, ...)) while another paste is
+    // still in flight: interleaving two pastes would scramble both.
     void pasteText(const QString& text, bool slow = false, int delayMs = 0);
+
+    // Drops every chunk not yet posted and aborts the one in flight.
+    // Whatever already reached the target's HID stays typed — this stops
+    // the paste, it does not undo it.
+    void cancelPaste();
+    bool pasteBusy() const;
 
     // ATX power affordances: `POST /api/atx/click_button?button=<X>`
     // where X is one of "power" (short press), "power_long" (force-off
@@ -119,6 +132,11 @@ signals:
     void msdUploadProgress(qint64 sent, qint64 total);
     void msdUploadFinished(bool ok, const QString& reason);
 
+    // Paste progress in characters, emitted once per acknowledged chunk,
+    // and a single completion. `reason` is empty on success.
+    void pasteProgress(int sent, int total);
+    void pasteFinished(bool ok, const QString& reason);
+
 private slots:
     void onLoginFinished();
     void onWsConnected();
@@ -134,6 +152,7 @@ private:
     void sendWsJson(const QString& type, const QJsonObject& event);
     void scheduleReconnect();
     QString currentPassword() const;   // password + TOTP if configured
+    void sendNextPasteChunk();         // pumps m_pasteQueue, one at a time
 
     Options                                 m_opts;
     std::unique_ptr<QNetworkAccessManager>  m_nam;
@@ -145,6 +164,14 @@ private:
     bool                                    m_stopped = false;
     bool                                    m_initialStateSeen = false;
     int                                     m_reconnectBackoffMs = 1000;
+
+    // In-flight paste state (see pasteText / sendNextPasteChunk).
+    QList<QByteArray>                       m_pasteQueue;
+    QNetworkReply*                          m_pasteReply = nullptr;
+    bool                                    m_pasteSlow = false;
+    int                                     m_pasteDelayMs = 0;
+    int                                     m_pasteSentChars = 0;
+    int                                     m_pasteTotalChars = 0;
 };
 
 }  // namespace glasshouse

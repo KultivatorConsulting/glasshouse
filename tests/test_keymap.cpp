@@ -36,6 +36,10 @@ private slots:
     void unknownKeyReturnsEmpty();
     void enterVsNumpadEnterDistinct();
     void shiftedSymbolsMapToPhysicalCode();
+    void sanitisePassesPlainAscii();
+    void sanitiseFoldsSmartPunctuation();
+    void sanitiseNormalisesLineEndings();
+    void sanitiseDropsAndCountsUnmappable();
 };
 
 void TestKeyMap::lettersAreContiguous() {
@@ -122,6 +126,40 @@ void TestKeyMap::unknownKeyReturnsEmpty() {
     // invent wire names the server will silently discard anyway.
     QCOMPARE(keyEventToWire(mkKey(Qt::Key_MediaPlay)), QString());
     QCOMPARE(keyEventToWire(mkKey(Qt::Key_VolumeUp)),  QString());
+}
+
+void TestKeyMap::sanitisePassesPlainAscii() {
+    int dropped = -1;
+    const QString in = QStringLiteral("sudo systemctl restart kvmd\tok!~");
+    QCOMPARE(sanitiseForPrint(in, &dropped), in);
+    QCOMPARE(dropped, 0);
+}
+
+void TestKeyMap::sanitiseFoldsSmartPunctuation() {
+    // The web-copy case: curly quotes and dashes would vanish mid-word.
+    int dropped = -1;
+    QCOMPARE(sanitiseForPrint(QString::fromUtf8("don’t “quote” me — ok…"),
+                              &dropped),
+             QStringLiteral("don't \"quote\" me -- ok..."));
+    QCOMPARE(dropped, 0);
+
+    // Non-break space is a space, not a dropped character.
+    QCOMPARE(sanitiseForPrint(QString::fromUtf8("a b")), QStringLiteral("a b"));
+}
+
+void TestKeyMap::sanitiseNormalisesLineEndings() {
+    // A surviving CR would type its own Enter and double every line.
+    QCOMPARE(sanitiseForPrint(QStringLiteral("a\r\nb\rc\nd")),
+             QStringLiteral("a\nb\nc\nd"));
+}
+
+void TestKeyMap::sanitiseDropsAndCountsUnmappable() {
+    int dropped = -1;
+    // Emoji and CJK have no en_US keymap position; the zero-width joiner
+    // between them is invisible filler and must not inflate the count.
+    QCOMPARE(sanitiseForPrint(QString::fromUtf8("hi 你好 ﻿!"), &dropped),
+             QStringLiteral("hi  !"));
+    QCOMPARE(dropped, 2);
 }
 
 QTEST_APPLESS_MAIN(TestKeyMap)

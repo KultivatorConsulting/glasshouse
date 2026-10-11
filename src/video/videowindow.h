@@ -52,7 +52,8 @@ public:
                            const QSize& logicalDesktop,
                            const QString& releaseHotkey,
                            const QString& fullscreenHotkey,
-                           const QString& specialKeysHotkey);
+                           const QString& specialKeysHotkey,
+                           const QString& pasteHotkey);
 
     // Tell this window about every other window in the session, so that
     // when capture is held here, mouse events whose cursor is over a
@@ -100,6 +101,9 @@ public slots:
     // Written only by main.cpp, which is the only place that can compare
     // every window's actual resolution against the configured layout.
     void setResolutionLabel(const QString& text);
+    // Transient status-bar message (Qt's temporary message area, so it
+    // leaves the permanent readouts alone). Used for paste feedback.
+    void flashStatus(const QString& text, int ms = 4000);
 
     // Public so the multi-window single-capture enforcement in main.cpp
     // can release this window's capture when a sibling claims one.
@@ -130,6 +134,10 @@ signals:
     // Target → Mass Storage… menu item; main.cpp toggles the shared
     // MsdDialog.
     void showMsdRequested();
+    // The paste hotkey fired. main.cpp owns the clipboard read, since
+    // only it can reach the HID master. Any held modifiers have already
+    // been released on the target by the time this is emitted.
+    void pasteClipboardRequested();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -171,6 +179,17 @@ private:
     // coords — the region the pointer is confined to during capture.
     QList<QRect> sessionWindowRects() const;
 
+    // Send key-up for every modifier wire name, whether or not we think
+    // it is down — the target has no way to tell us, and a stuck Ctrl is
+    // worse than a redundant release (the server no-ops the latter).
+    void releaseHeldModifiers();
+
+    // The single entry point for the paste hotkey. Two routes reach it —
+    // the QShortcut while uncaptured, handleKey while the keyboard grab
+    // is active — and which one wins is not something we should depend
+    // on, so the modifier release lives here rather than in either.
+    void requestClipboardPaste();
+
     bool handleMouseMove(QMouseEvent* ev);
     bool handleMouseButton(QMouseEvent* ev, bool pressed);
     bool handleWheel(class QWheelEvent* ev);
@@ -190,6 +209,7 @@ private:
     int           m_releaseHotkey      = 0;
     int           m_fullscreenHotkey   = 0;
     int           m_specialKeysHotkey  = 0;
+    int           m_pasteHotkey        = 0;
 
     // m_captured: this window owns the Qt grabs (it is the holder).
     // m_sessionCaptured: *some* window in the session is the holder — true

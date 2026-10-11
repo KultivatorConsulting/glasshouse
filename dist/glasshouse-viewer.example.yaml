@@ -46,6 +46,9 @@ auth:
 release_hotkey:      "Ctrl+Alt+Shift+Backspace"
 fullscreen_hotkey:   "F11"
 special_keys_hotkey: "Ctrl+Alt+K"
+# Types the host clipboard onto the target as keystrokes, via the HID
+# master's server-side keymap. Text-only; press again mid-paste to abort.
+paste_hotkey:        "Ctrl+Alt+Shift+V"
 
 # Optional. Each entry produces a button in the Special Keys palette's
 # Custom tab (and is the source of truth for the future macro-pad daemon).
