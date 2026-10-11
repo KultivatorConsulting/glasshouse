@@ -1072,6 +1072,13 @@ exclusive right edge, taking every image pixel the selection touches.
 | drag running off the frame | past the edge | clamped inside the image |
 | click, or a nudge under 8 px | — | cancelled, nothing sent |
 
+**One provider, for now.** `TuiClient` is constructed directly, so the
+feature currently requires a Tui key. That is a known limitation rather
+than the intended shape: HARNESS.md §6.1 records the generalisation to
+`none` / `command` / `openai` providers behind the surface `TuiClient`
+already has, with Tui becoming `provider: openai` plus the endpoint and
+model fields the `ocr:` block carries today. Unbuilt.
+
 **Tui specifics.** PNG rather than JPEG, so text edges stay crisp. A
 1920×1080 frame is 2.07 MP, just under the ~2.1 MP above which Tui downscales
 server-side, so even a full-frame selection survives at native resolution.

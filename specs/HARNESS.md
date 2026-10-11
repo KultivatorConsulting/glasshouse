@@ -1,9 +1,9 @@
 # Glasshouse harness — design
 
 Status: **proposed, unbuilt.** Captured 2026-10-11 from a design
-discussion; §5.4 and the §9–§10 decisions added 2026-10-12. Nothing
-here is implemented; the pieces it depends on (region capture, clipboard
-paste) are. See DESIGN.md §10.9 / §10.10.
+discussion; §5.4, §6.1 and the §9–§10 decisions added 2026-10-12.
+Nothing here is implemented; the pieces it depends on (region capture,
+clipboard paste) are. See DESIGN.md §10.9 / §10.10.
 
 ---
 
@@ -286,10 +286,63 @@ faster:
   extraction quality on small text.
 
 **The discipline: OpenCV answers "did this change, and where did this
-patch move to". Tui answers "what does this mean".** The failure mode is
-acquiring a taste for it and starting to hand-write detectors for
-specific UI elements, at which point the result is a brittle vision
+patch move to". A model answers "what does this mean".** The failure
+mode is acquiring a taste for it and starting to hand-write detectors
+for specific UI elements, at which point the result is a brittle vision
 system instead of a model that already works.
+
+### 6.1 The remote half is pluggable
+
+Region extraction (§10.10) currently constructs a `TuiClient` directly.
+That was right for one feature on one workstation and wrong as the only
+option in a public LGPL-3.0 repository: a clone that does nothing
+without a Kultivator API key is a poor artifact, and it leaves the
+privacy row in §11 with no mitigation but "the user chose the
+rectangle".
+
+So extraction goes behind an interface. `TuiClient` already has exactly
+the right surface — `extractText(QByteArray png)`, `busy()`, `cancel()`,
+`finished(ok, text, reason)` — so this is a rename and a base class, not
+a redesign.
+
+| provider | covers | cost |
+|---|---|---|
+| `none` | default for a fresh clone; the hotkey reports that nothing is configured | nil |
+| `command` | any host tool, fed PNG on stdin, text from stdout | nil — no build or runtime dependency |
+| `openai` | Tui, OpenAI, Ollama, vLLM, LM Studio — anything with `/v1/chat/completions` and `image_url` parts | the existing code, renamed |
+
+**Three providers rather than four.** "Built-in OCR" and "the host's
+OCR" collapse into `command`, because the generic form of host OCR on
+Linux *is* a subprocess — there is no system OCR service to call, the
+way macOS and Windows have one. Tesseract is in noble (5.3.4; about
+8 MB with `libtesseract5` and the English data) and reads stdin to
+stdout as `tesseract - -`, so local OCR becomes one line of
+configuration instead of a linked dependency that every install carries
+whatever provider it uses. Link `libtesseract` later only if the
+subprocess hop proves to matter.
+
+**Tui stops being special**: it becomes `provider: openai` plus the
+endpoint, key and model fields the `ocr:` block already has. Existing
+configurations keep working — default the provider to `openai` when an
+`api_key` is set and `none` otherwise, and nothing needs migrating.
+
+#### What degrades without a provider
+
+Worth stating plainly, because the four stages of §5 do not have the
+same requirements:
+
+| stage | needs |
+|---|---|
+| region extraction (§10.10) | any provider, including `command` |
+| watcher **detection** | nothing — OpenCV, local, always available |
+| watcher **locate** (§5 step 1) | a **vision-capable** provider; `command` and Tesseract cannot find "the Chrome icon in the system bar" |
+| watcher **judge** (§5 step 5) | the harness's own model, which is the private package's business |
+
+So watchers need a vision-capable provider configured, while region
+extraction works with anything. That is a real constraint, not a
+footnote: on a `command`-only install the watcher registry can still
+*watch* an explicitly given rectangle, it just cannot resolve one from
+a description.
 
 ## 7. Kahu integration
 
@@ -358,7 +411,7 @@ dependency, and OpenCV is Apache-2.0, which sits fine under LGPL-3.0.
 |---|---|
 | watcher registry, ring buffers, OpenCV detection | Tauri shell hosting `chat-vue` |
 | MCP server (screens, desktop, HID, frame queries) | Kahu Go backend |
-| the trigger / event-out layer, consumer-agnostic | the §7 turn-opening logic |
+| the `watchers/*` tool family (§9.1) | the §7 turn-opening logic |
 
 This is worth wanting for its own sake, not just for the licence: the
 public repo stays complete. Someone cloning it gets watchers and an MCP
@@ -367,32 +420,64 @@ OpenAI-compatible. What is proprietary is the particular Kahu harness,
 not the capability. A viewer with a hole where the interesting feature
 used to be would be a worse artifact.
 
-### 9.1 The event-out layer is two mechanisms
+### 9.1 Watching is tools, and the harness polls
 
-Pull is MCP: the agent asks for frames, screenshots, typed text.
+The viewer does not push. **Watching is another MCP tool family, and
+one of its calls polls for changes** — which means any harness, not
+only Kahu, uses the same mechanism.
 
-Push needs its own answer, and **launching is only half of it**:
+```
+watchers/create   description -> locate -> registry entry
+watchers/list
+watchers/poll     cursor -> events since, plus the next cursor
+watchers/frames   watcher + time range -> filmstrip or stills (§5.4)
+watchers/delete
+```
 
-* **Launch with context** — the `Ctrl+Shift+Alt+H` hotkey starting a
-  third-party application and handing it the current context, exactly
-  as any other GUI program would be invoked. One-shot, stateless.
-* **Notify something already running** — a watcher fires hours after it
-  was set. Spawning a process per event either loses the accumulated
-  context that makes §8 work, or presumes the backend is already up, in
-  which case it was never a launch. This needs a persistent channel.
+The model configures its own watchers through the same surface it reads
+them from, and `watchers/frames` is the queryable buffer §5.4 already
+argued for.
 
-MCP is JSON-RPC and carries notifications in both directions over an
-established session, so this should ride the transport already there
-rather than needing a second one. Confirm against the spec revision
-targeted before relying on it.
+**Polling needs no protocol feature**, which is exactly why it is the
+portable choice: polling is calling a tool repeatedly. What MCP adds is
+the push alternative — `resources/subscribe` on a URI, then
+`notifications/resources/updated` — and that is the part with uneven
+support, since `subscribe` is an optional server capability and clients
+vary in whether they handle the notification. Build on the floor, not
+on the option.
 
-**The discipline: the event-out stays generic.** The viewer emits
-"watcher W fired, here is the crop and the original intent" to whatever
-has subscribed, and knows nothing about the subscriber; launch-with-
-context is then one subscriber shape and a connected consumer the other.
-Let that surface become Kahu-shaped and the private repo starts needing
-viewer patches, which means lockstep releases — the split costing
-something instead of paying.
+Three further reasons polling is the right default here, beyond
+portability:
+
+* **The events are already buffered.** §5.4 holds a ring of timestamped
+  crops, so `poll(since: cursor)` is served from data already in hand.
+  There is no missed-event problem for push to solve — the buffer *is*
+  the durability.
+* **Delivery is decoupled from detection.** Detection runs at frame
+  rate locally; a watcher fires a few times a day. Polling every
+  10–30 s is ample, and the latency that mattered — a toast gone before
+  it could be captured — was solved by the ring, not by delivery speed.
+* **It inverts the dependency.** Glasshouse keeps no subscriber
+  registry, no outbound connection, no delivery retry and no "what if
+  the harness is down". It answers questions. That makes the generic
+  event surface a property of the protocol shape rather than a rule
+  someone has to remember not to break.
+
+Two things remain available if wanted later. `watchers/poll` can
+**long-poll** — block until an event or N seconds, with
+`notifications/progress` as keepalive — which yields push-like latency
+from plain request/response. And each watcher's current crop can
+*additionally* be exposed as a resource URI, so clients that do support
+subscriptions get them as an optimisation while polling stays the
+contract.
+
+**The hotkey is the other attachment point.** `Ctrl+Shift+Alt+H` starts
+a third-party application and hands it the current context, exactly as
+any other GUI program would be invoked: one-shot, stateless, no
+knowledge of what it started. Nothing about the §8 host-notification
+case needs more than this plus polling — the harness backend is a
+viewer-spawned child (§10), so it is up whenever Glasshouse is, and the
+chain is detect -> buffer -> harness polls -> D-Bus.
 
 ### 9.2 Consequences
 
@@ -455,8 +540,10 @@ Still open:
 * **Watcher persistence format.** Where the registry lives across
   restarts, and whether a stale rectangle re-locates eagerly on startup
   or lazily on first miss.
-* **Whether MCP notifications carry the push direction** (§9.1), which
-  decides if a second channel is needed at all.
+* **Which vision-capable providers are worth testing** for the locate
+  step beyond Tui (§6.1), and whether a local vision model is good
+  enough at finding a named UI element to make watchers work on a
+  `command`-only install.
 
 ## 11. Privacy posture
 
@@ -480,3 +567,13 @@ passed through. It must stay in memory, never reach disk, and be dropped
 when the watcher is removed or the window closes. And because the MCP
 tool makes it fetchable, the ceiling on what can leave in one turn
 becomes the buffer's depth instead of a single crop.
+
+**§6.1 supplies the mitigation this section was missing.** With a
+pluggable provider, "nothing leaves the machine" becomes a configuration
+rather than an argument: `provider: command` keeps extraction entirely
+local, and `provider: none` disables it. The honest form of the risk row
+is therefore conditional on the configured provider, with the remote
+case being the one that needs the reasoning above. Watchers are the
+exception — their locate step needs a vision-capable provider, so a
+fully local install can watch a given rectangle but cannot resolve one
+from a description.
