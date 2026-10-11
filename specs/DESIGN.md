@@ -559,6 +559,19 @@ window shows a spinner with an elapsed-seconds count and puts a busy
 cursor under the pointer for the duration; pressing the hotkey again
 abandons the request. See §10.10.
 
+### Phase 10 — Kahu harness — proposed, unbuilt
+An assistant that watches the target over the PiKVMs, judges what it
+sees against conversation context, and reports in a chat window the
+user opens when they want it — proposing rather than acting, with
+word-described screen watchers and an optional host notification for
+the few events worth chasing the user over.
+
+Phases 8 and 9 turn out to be its primitives: `/api/hid/print` is the
+act path, and region capture is the observe path.
+
+Design captured separately in **[HARNESS.md](HARNESS.md)** — it is
+architecture for unbuilt work, and this document records what exists.
+
 ### Out of scope for v1
 * Clipboard sync between local and target.
 * Audio (microphone to target, speaker from target).
@@ -1363,3 +1376,40 @@ Alternatives on the same PiKVM (not used by this client):
   `kvmd-media`. Does not exist on stock PiKVM (the package is not
   installed); a 404 on the upgrade is the standard symptom and is not
   worth investigating further on a stock box.
+
+### 13.6 Capability surface of the deployed units (verified 2026-10-11)
+
+Enumerated read-only over `GET` against both PiKVMs, to ground what is
+worth mapping into the client. **The two units are not the same**, and
+anything per-head must read `features` / `limits` per host rather than
+assume:
+
+| | 192.168.1.71 | 192.168.1.144 |
+|---|---|---|
+| hardware | v4 (`__v4_locator__` GPIO) | v3 |
+| kvmd | 3.199 | 3.106 |
+| ustreamer | 5.37 | 5.9 |
+| `desired_fps` ceiling | 70 | 60 |
+| MSD features | cdrom, multi, **rw** | cdrom, multi |
+
+Common to both: `extras` has janus and webterm enabled, vnc and ipmi
+disabled. `/api/switch` returns **404** — no multi-port switch support
+on this firmware. `/api/redfish/v1` is present but redundant with ATX
+here. GPIO exposes only the built-in outputs (`__v3_usb_breaker__` on
+both, `__v4_locator__` on the v4) with no user-defined pins and an empty
+view table.
+
+Streamer `features` reports `h264: true`, `quality: true`,
+**`resolution: false`** — the capture resolution is driven by the source
+EDID and *cannot* be set through the API. That closes the obvious door
+on §10.8: detection really is the only option for layout drift.
+
+`params` are tunable via `set_params` and currently unmapped by the
+client: `quality`, `desired_fps`, `h264_bitrate`, `h264_gop`. Both boxes
+were asking for more than they achieve (40 and 30 desired, 27 captured),
+so a per-window quality/fps control is the most direct lever available
+on the viewer CPU cost noted in §10.6.
+
+Also unmapped: the GPIO USB breaker, which is a remote "unplug the USB
+from the target" — a HID-recovery tool that otherwise needs hands on
+hardware.
