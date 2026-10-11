@@ -1,8 +1,9 @@
 # Glasshouse harness — design
 
 Status: **proposed, unbuilt.** Captured 2026-10-11 from a design
-discussion. Nothing here is implemented; the pieces it depends on
-(region capture, clipboard paste) are. See DESIGN.md §10.9 / §10.10.
+discussion; §5.4 added 2026-10-12. Nothing here is implemented; the
+pieces it depends on (region capture, clipboard paste) are. See
+DESIGN.md §10.9 / §10.10.
 
 ---
 
@@ -171,12 +172,78 @@ This also inverts the capture rule. For a steady event — "the page
 finished loading" — wait for the region to settle before capturing. For
 a transient one, **snapshot at the instant of detection**: by the time
 Tui answers, the toast is gone. So it is a per-watcher property, not a
-global policy. Grabbing two frames a few hundred milliseconds apart is
-worth it, since the first may catch a fade-in and Tui accepts four
-images per request.
+global policy. Detection is also always slightly late, which is what
+§5.4 is for.
 
 A fixed region such as "centre top of the primary screen" is the easy
 anchoring case — it does not drift, so §5.1 matters much less there.
+
+### 5.4 Volatile watchers keep a short history
+
+Marking a watcher **volatile** gives its rectangle a rolling buffer of
+recent crops, so the assistant can look back through a change instead of
+seeing only the frame that tripped the trigger.
+
+This matters because detection is late by construction. A threshold
+trips once a toast has substantially faded in, and the single most
+useful frame is often the one *before* the change — the one that says
+what was there to begin with. A buffer supplies both ends of a
+transition without having to guess when to sample.
+
+Three properties keep it affordable.
+
+**Buffer the crop, not the frame.** A toast-sized region of 420x110 is
+about 135 KB as raw RGB, against 6 MB for the full frame. The crop
+already exists; the detector made it.
+
+**Retain on change, not on tick.** The detector computes a difference
+metric every frame to drive the trigger, so reuse that number to decide
+whether a frame is worth keeping. A quiet region then costs one frame
+for as long as it stays quiet, and a whole toast lifecycle — fade in,
+dwell, fade out — costs tens of frames rather than hundreds. Memory
+scales with activity instead of with elapsed time, which is the right
+shape for something left running all day. Cap each watcher in bytes,
+evicting oldest first.
+
+**Keep them raw; encode only what is sent.** PNG-encoding at frame rate
+would spend the one resource already under pressure — two active streams
+sit near 133% CPU (DESIGN.md §10.3). Compression belongs at the point of
+transmission, where the frame count is in single digits.
+
+Frames carry wall-clock timestamps rather than only frame indexes. "A
+message arrived" is far less useful than "a message arrived at 14:32",
+and the motivating case is explicitly about returning to a machine after
+being away from it.
+
+A second, decimated lane — one frame every couple of seconds across the
+last few minutes — answers "what happened while I was away" as opposed
+to "what just happened". With change-based retention it is nearly free
+on a quiet region.
+
+#### Getting a timeseries past a four-image limit
+
+Tui accepts four images per request, so a buffer of thirty crops cannot
+simply be attached. Two mechanisms, both wanted:
+
+* **Filmstrip.** Tile crops into a grid with each one's timestamp drawn
+  beneath it: `cv::hconcat` / `cv::vconcat` and `cv::putText`, all
+  inside the OpenCV dependency §6 already justifies. Nine of those
+  420x110 crops tile to 1260x330, a fraction of the ~2.1 MP threshold
+  above which Tui downscales server-side (DESIGN.md §10.10) — so one
+  image slot carries nine moments and four carry thirty-six.
+* **A queryable buffer.** Expose the ring as a tool on the MCP server
+  in §3: fetch a watcher's frames between two times. The firing turn
+  then carries a filmstrip to judge from, and the model asks for a
+  specific moment at full resolution when it needs to read something.
+
+The second is the more valuable. It makes the history something the
+assistant navigates on demand rather than a larger fixed payload, and it
+is what turns "it has context on what has been going on" into a property
+of the system instead of a hope about conversation length.
+
+**The footgun is a large volatile region.** Full-screen at frame rate is
+roughly 6 MB per frame, so the flag needs an area ceiling, above which a
+watcher is forced into the decimated lane whatever it was marked.
 
 ## 6. Local vision: OpenCV
 
@@ -253,6 +320,9 @@ conversation rather than merely saying something happened.
   local Go binary, or remote. Live mode needs `TUI_API_KEY`.
 * **Watcher persistence format**, and how many are realistic before the
   per-frame comparisons stop being free.
+* **The per-watcher byte budget** for §5.4 buffers, the area ceiling
+  above which volatile is refused, and whether the decimated lane is
+  worth building at the same time as the hot one.
 
 ## 10. Privacy posture
 
@@ -269,3 +339,10 @@ until a change fires, and then only a small crop leaves. So the volume
 is low and bounded by events rather than by time — but it is a standing
 flow rather than an on-demand one, and that row needs rewriting when
 this is built, not left as-is.
+
+**Volatile watchers (§5.4) need their own line in it.** A rolling buffer
+is a further step again: screen content is *retained* rather than merely
+passed through. It must stay in memory, never reach disk, and be dropped
+when the watcher is removed or the window closes. And because the MCP
+tool makes it fetchable, the ceiling on what can leave in one turn
+becomes the buffer's depth instead of a single crop.
