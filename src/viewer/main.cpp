@@ -26,6 +26,7 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
+#include <QVideoSink>
 
 #include <memory>
 #include <optional>
@@ -550,15 +551,23 @@ int main(int argc, char** argv) {
                          router, &InputRouter::routeKey);
 
         // Capture is session-wide; whichever window the user clicked
-        // becomes the holder. The holder shows "capture ON"; siblings
-        // keep their normal status. No cross-window release needed —
-        // there's only one Qt grab in flight at a time.
-        QObject::connect(inst.window, &VideoWindow::captureStateChanged, inst.window,
-            [&inst](bool on) {
-                inst.window->setConnectionStatus(on
-                    ? QStringLiteral("%1: capture ON — release hotkey to stop")
-                          .arg(inst.host)
-                    : QStringLiteral("%1: capture OFF").arg(inst.host));
+        // becomes the holder, but the badge follows the cursor so it marks
+        // the window actually being worked in. No cross-window release
+        // needed — there's only one Qt grab in flight at a time.
+        QObject::connect(inst.window, &VideoWindow::captureStatusChanged, inst.window,
+            [&inst](bool sessionActive, bool focused) {
+                if (!sessionActive) {
+                    inst.window->setConnectionStatus(
+                        QStringLiteral("%1: capture OFF").arg(inst.host));
+                } else if (focused) {
+                    inst.window->setConnectionStatus(
+                        QStringLiteral("%1: capture ON — release hotkey to stop")
+                            .arg(inst.host));
+                } else {
+                    inst.window->setConnectionStatus(
+                        QStringLiteral("%1: capture ON — cursor elsewhere")
+                            .arg(inst.host));
+                }
             });
 
         // Special-keys palette: hotkey on any window toggles the same
@@ -584,6 +593,106 @@ int main(int argc, char** argv) {
         QList<QPointer<VideoWindow>> all;
         for (auto& inst : instances) all.append(QPointer<VideoWindow>(inst.window));
         for (auto& inst : instances) inst.window->setSiblings(all);
+    }
+
+    // ------------------------------------------------------------------
+    // Target-layout drift watch (DESIGN §10.8).
+    //
+    // The coord transform is purely proportional: a monitor's share of the
+    // logical desktop is all that reaches the wire, so the target's real
+    // pixel resolution never enters the maths. That means every monitor
+    // changing resolution by the same factor is harmless — but one monitor
+    // changing while another doesn't shifts the shares, and the cursor then
+    // lands on the wrong part of the target desktop.
+    //
+    // Each PiKVM's capture resolution is the decoded video size, so we can
+    // compare the real per-monitor scale factors against the config and say
+    // which case we're in. What we *can't* see is the target's arrangement
+    // (which monitor is left of which) — PiKVM has no visibility into that,
+    // so a reordering only shows up as the mapping being wrong.
+    // ------------------------------------------------------------------
+    {
+        auto lastReport = std::make_shared<QString>();
+        auto recheck = [&instances, lastReport]() {
+            struct Entry { QString host; QSize cfg; QSize actual; };
+            QList<Entry> entries;
+            for (auto& inst : instances) {
+                QSize actual;
+                if (auto* sink = inst.window->videoSink()) actual = sink->videoSize();
+                entries.append({inst.host, inst.monitorRect.size(), actual});
+            }
+
+            // Scale factors per monitor; mapping stays correct as long as
+            // every monitor shares the same width scale and the same height
+            // scale (see the block comment above).
+            bool allKnown = true, uniform = true, exact = true;
+            double kx0 = 0.0, ky0 = 0.0;
+            for (const auto& e : entries) {
+                if (e.actual.isEmpty() || e.cfg.isEmpty()) { allKnown = false; continue; }
+                const double kx = double(e.actual.width())  / double(e.cfg.width());
+                const double ky = double(e.actual.height()) / double(e.cfg.height());
+                if (kx0 == 0.0) { kx0 = kx; ky0 = ky; }
+                if (qAbs(kx - kx0) > 0.01 || qAbs(ky - ky0) > 0.01) uniform = false;
+                if (e.actual != e.cfg) exact = false;
+            }
+
+            for (int i = 0; i < entries.size() && i < instances.size(); ++i) {
+                const Entry& e = entries[i];
+                // Terse on the happy path — the status bar is tight on a
+                // half-width window — and loud only when it matters.
+                QString text;
+                if (e.actual.isEmpty()) {
+                    text = QStringLiteral("—");
+                } else if (e.actual == e.cfg) {
+                    text = QStringLiteral("%1×%2")
+                               .arg(e.actual.width()).arg(e.actual.height());
+                } else {
+                    text = QStringLiteral("%1%2×%3 ≠ config %4×%5")
+                               .arg(allKnown && uniform ? QString()
+                                                        : QStringLiteral("⚠ "))
+                               .arg(e.actual.width()).arg(e.actual.height())
+                               .arg(e.cfg.width()).arg(e.cfg.height());
+                }
+                instances[i].window->setResolutionLabel(text);
+            }
+
+            if (!allKnown || exact) return;  // nothing to say yet, or all matches
+
+            QStringList detail;
+            for (const auto& e : entries) {
+                detail << QStringLiteral("%1 %2×%3 (config %4×%5)")
+                              .arg(e.host)
+                              .arg(e.actual.width()).arg(e.actual.height())
+                              .arg(e.cfg.width()).arg(e.cfg.height());
+            }
+            const QString report = detail.join(QStringLiteral("; "));
+            if (report == *lastReport) return;   // only log on change
+            *lastReport = report;
+
+            if (uniform) {
+                qCInfo(lcVideo).nospace()
+                    << "target capture resolution differs from config, but every "
+                    << "monitor scaled by the same factor, so the mouse mapping "
+                    << "is unaffected: " << report;
+            } else {
+                qCWarning(lcVideo).nospace()
+                    << "TARGET LAYOUT MISMATCH — the monitors no longer have the "
+                    << "proportions target.monitors describes, so mouse "
+                    << "coordinates will land on the wrong part of the target "
+                    << "desktop: " << report
+                    << ". Fix the target's display settings, or update "
+                    << "target.monitors / target.logical_desktop to match. "
+                    << "(A left/right reordering on the target looks the same "
+                    << "from here and can't be detected — check that too.)";
+            }
+        };
+
+        for (auto& inst : instances) {
+            if (auto* sink = inst.window->videoSink()) {
+                QObject::connect(sink, &QVideoSink::videoSizeChanged, &app, recheck);
+            }
+        }
+        recheck();
     }
 
     // ------------------------------------------------------------------

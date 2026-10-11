@@ -148,6 +148,11 @@ ny = vy / V.h
 tx_px = monitor[i].origin.x + nx * monitor[i].size.w
 ty_px = monitor[i].origin.y + ny * monitor[i].size.h
 
+# NOTE: steps 4–6 only ever use each monitor's *share* of the logical
+# desktop — the target's real pixel resolution never enters the maths.
+# A uniform resolution change across all monitors is therefore harmless;
+# a non-uniform one, or a reordering, breaks the mapping. See §10.8.
+#
 # 5. Map target pixel coords to PiKVM API coord space.
 #    PiKVM API uses signed s16 [-32768, 32767] with (0, 0) at the
 #    CENTER of the target's combined logical desktop. Linear mapping,
@@ -814,6 +819,104 @@ client.
   bandwidth, but carries the §10.5 `webrtcbin` leak. The MJPEG fps cap is
   the leak-free middle ground.
 
+### 10.7 Qt delivers wheel events without consulting the mouse grabber (verified 2026-10-11)
+
+Scrolling only reached the target when the cursor was over the window that
+had started the capture. Mouse moves, buttons and keys all crossed windows
+correctly; the wheel was the lone exception.
+
+**Cause.** Qt routes `QWheelEvent` through
+`QWidgetWindow::handleWheelEvent`, which delivers to
+`rootWidget->childAt(pos)` — falling back to the root widget when `childAt`
+returns null — and **never consults `QWidget::mouseGrabber()`**. Mouse
+moves and buttons go through `QApplicationPrivate::pickMouseReceiver`
+instead, which does honour the grab. That asymmetry is the whole bug.
+
+Verified with a two-window Qt 6.7.3 probe driving
+`QWindowSystemInterface::handleWheelEvent` directly, with the event filter
+installed on the child widget exactly as `VideoWindow` had it:
+
+| Wheel delivered to | Position | Lands on |
+|---|---|---|
+| holder's `QWindow` | inside the holder | holder's video widget ✓ |
+| holder's `QWindow` | outside the holder (what an X11 pointer grab produces when the cursor is over a sibling) | holder's **QMainWindow root** — the video-widget filter never fires |
+| sibling's `QWindow` | inside the sibling | **sibling's** video widget — *not* redirected to the grabber |
+
+So the scroll was lost either way: the holder's filter wasn't reached, or
+the sibling's `handleWheel` early-returned on its own `m_captured == false`.
+
+**Fix.** Two changes in `videowindow.cpp`, both tiny:
+* install the event filter on the `QMainWindow` as well as the video widget,
+  and accept `QEvent::Wheel` from either — non-wheel events stay scoped to
+  `watched == m_video`, because `handleMouseButton` tests against
+  `m_video->rect()`, which is 0-based, and a menubar click would otherwise
+  pass that test and start capture;
+* gate `handleWheel` on the **session** (`m_captured || m_sessionCaptured`)
+  rather than on this window owning the grab. The wheel notch carries no
+  position — the target scrolls wherever its cursor already is, put there
+  by the move stream — and every window's `mouseWheel` signal already fans
+  into the same HID master, so any session window may emit it.
+
+Exactly one of the two filters fires per event (`handleWheel` returns true
+while captured, which stops propagation), so there is no double-scroll.
+
+**Deliberately not done: moving the Qt grab to the window under the
+cursor.** It would also work, but it means `releaseMouse`/`grabMouse` churn
+on every window crossing, and grab manipulation during capture is what
+froze input twice during the §10.2 confinement work. It buys nothing
+either — moves, clicks and keys were already session-wide. The capture
+badge follows the cursor via plain state (`captureStatusChanged`), with no
+grab movement.
+
+Verified end-to-end against the real `VideoWindow` class (two windows,
+capture started by a synthetic click, wheel delivered all three ways):
+one `mouseWheel` emission per event in every case, zero before capture and
+zero after release, and the badge tracking the cursor onto the sibling.
+
+### 10.8 Target layout drift (verified 2026-10-11)
+
+**The coord transform is purely proportional.** Step 4–6 of §5.2 reduce to
+each monitor's *share* of the logical desktop:
+`origin.x / desktop.w` and `size.w / desktop.w`. The target's real pixel
+resolution never enters the maths — only the config's ratios do.
+
+Consequences, worth internalising before debugging a "mouse is on the wrong
+screen" report:
+
+* **Uniform rescaling is harmless.** Two 1920×1080 monitors becoming two
+  1280×720 ones leaves every ratio unchanged, so the mapping stays correct
+  with a stale config. Same for a width scale that differs from the height
+  scale, as long as all monitors share it.
+* **Non-uniform rescaling breaks it.** One monitor changing while another
+  doesn't moves the shares: a 1920×1080 + 1280×720 pair really splits the
+  desktop 60/40, but a config still claiming 50/50 maps the left part of
+  window 2 onto monitor 1.
+* **Reordering breaks it and cannot be detected.** PiKVM has no visibility
+  into how the target composes its desktop, so a left/right swap is
+  invisible from the client. (Observed 2026-10-11: the target's GNOME
+  session reverted to defaults, putting the right-hand PiKVM's monitor on
+  the left at 1280×720.)
+
+**Detection shipped.** Each PiKVM's capture resolution is the decoded video
+size (`QVideoSink::videoSize()`, already used for the letterbox). `main.cpp`
+watches `videoSizeChanged` on every window, puts the live resolution in the
+status bar, and compares the per-monitor scale factors:
+
+* all monitors share one width scale and one height scale → `INFO`, mapping
+  unaffected, status bar shows `res: 1280×720 (config 1920×1080)`;
+* scales disagree → `WARNING` naming every host's actual vs configured size,
+  and a `⚠` on each status bar.
+
+The warning also points out that a reordering looks identical from here, so
+the target's arrangement is worth checking too.
+
+**Not done: auto-adapting the layout.** Recomputing origins and
+`logical_desktop` from the actual resolutions (keeping the configured
+left-to-right order) would fix the non-uniform case without user action, but
+it is a heuristic — it can't reproduce gaps, vertical alignment when heights
+differ, or any reordering. Deferred in favour of saying clearly what
+changed.
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
@@ -822,7 +925,8 @@ client.
 | WebRTC negotiation latency | open | Measure auth-to-first-frame; if ICE gathering dominates, set `stun-server=NULL` on webrtcbin for LAN-only deployments |
 | KDE Wayland grab quirks | open | App-local hotkey avoids global-shortcut issues; test on real hardware in Phase 3 |
 | HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
-| Dock disconnect re-orders target monitors | open | Calibration flow or manual reassignment in config |
+| Dock disconnect re-orders target monitors | open (detected indirectly) | A reordering is invisible to the client (§10.8); the resolution-mismatch warning is the nearest signal. Manual reassignment in config |
+| Target display settings change resolution | **resolved (detected)** | §10.8 — status-bar resolution readout plus an INFO/WARNING split on whether the mapping is actually affected |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
 | `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |
 

@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enable debug logging without setting the env var.
 
 ### Fixed
+- **Mouse wheel only scrolled on the window that started the capture.**
+  Qt routes `QWheelEvent` without consulting `QWidget::mouseGrabber()` —
+  unlike mouse moves and buttons, which do honour the grab — so a scroll
+  over a sibling window was delivered either to the holder's `QMainWindow`
+  root (where no event filter was installed) or to the sibling's own video
+  widget (where `handleWheel` early-returned because that window didn't own
+  the grab). Either way the notch was dropped. The filter now also watches
+  the window itself, and `handleWheel` is gated on a session-wide capture
+  rather than on this window holding the grab; the notch carries no
+  position, so the target scrolls wherever its cursor already is. The Qt
+  grab is deliberately *not* moved between windows — see DESIGN.md §10.7.
 - **Cursor confinement during capture (X11).** While capture is held, the
   pointer is now penned inside the bounding rectangle of the session windows
   using XFixes pointer barriers, so it can't drift onto the local desktop or
@@ -42,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See DESIGN.md §10.2.
 
 ### Added
+- **Target layout drift warning.** The coord transform is purely
+  proportional — only each monitor's share of the logical desktop reaches
+  the wire — so a resolution change on the target is harmless when every
+  monitor scales by the same factor, and breaks the mouse mapping when they
+  don't. The status bar now shows each PiKVM's live capture resolution, and
+  the viewer compares the real per-monitor scale factors against
+  `target.monitors` on every resolution change: a uniform change logs at
+  INFO ("mapping unaffected"), a non-uniform one logs a WARNING naming each
+  host's actual vs configured size and flags the status bar with `⚠`. A
+  left/right reordering on the target is invisible to the client and the
+  warning says so. See DESIGN.md §10.8.
+- **Capture badge follows the cursor.** With a session capture active, the
+  "capture ON" status now shows on whichever window the cursor is over
+  rather than on the one that started it; other windows read "capture ON —
+  cursor on another window". State only — the Qt grab does not move.
 - **Local cursor marker during capture.** Instead of hiding the pointer,
   capture draws a zero-lag local marker (a haloed ring + centre dot by
   default) at the true pointer position. Because PiKVM is absolute-positioned

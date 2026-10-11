@@ -103,9 +103,14 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     m_decoderLabel = new QLabel(QStringLiteral("decoder: -"),   this);
     m_latencyLabel = new QLabel(QStringLiteral("latency: -"),   this);
     m_statsLabel   = new QLabel(QStringLiteral("video: -"),     this);
+    m_resLabel     = new QLabel(QStringLiteral("—"),            this);
+    m_resLabel->setToolTip(QStringLiteral(
+        "Target capture resolution. Shows ≠ config when the target's display "
+        "settings no longer match target.monitors — see DESIGN.md §10.8."));
 
     auto* bar = statusBar();
     bar->addWidget(m_statusLabel, 1);
+    bar->addPermanentWidget(m_resLabel);
     bar->addPermanentWidget(m_decoderLabel);
     bar->addPermanentWidget(m_latencyLabel);
     bar->addPermanentWidget(m_statsLabel);
@@ -115,6 +120,17 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     // otherwise leave them alone (so the window chrome still works).
     m_video->installEventFilter(this);
     m_video->setMouseTracking(true);
+
+    // Wheel events need a second filter on the window itself. Qt routes
+    // QWheelEvent *without* consulting QWidget::mouseGrabber() — unlike
+    // mouse moves and buttons — so while this window holds capture and the
+    // cursor sits over a sibling, QWidgetWindow::handleWheelEvent resolves
+    // childAt(pos) to nothing and delivers to the QMainWindow root instead
+    // of to m_video. Without this the scroll is silently dropped. See
+    // DESIGN.md §10.7. Non-wheel events stay scoped to m_video in
+    // eventFilter() — the menubar lives on this widget and its clicks must
+    // not reach handleMouseButton.
+    installEventFilter(this);
 
     // ~120 Hz coalescer for mouse moves. Always running — handleMouseMove
     // sets `m_mousePending` only while captured, so the timer is a no-op
@@ -261,7 +277,16 @@ void VideoWindow::setSiblings(const QList<QPointer<VideoWindow>>& siblings) {
     m_siblings = siblings;
 }
 
-ApiCoord VideoWindow::apiCoordForCursor(const QPoint& globalPos) const {
+QList<VideoWindow*> VideoWindow::sessionWindows() const {
+    QList<VideoWindow*> all;
+    for (const auto& sib : m_siblings) {
+        if (sib) all.append(sib.data());
+    }
+    if (all.isEmpty()) all.append(const_cast<VideoWindow*>(this));
+    return all;
+}
+
+VideoWindow* VideoWindow::windowForCursor(const QPoint& globalPos) const {
     // Prefer whichever sibling currently contains the cursor — that's
     // the window whose CoordTransform should drive the target's HID
     // for this event. Fall back to self if the cursor is outside every
@@ -270,11 +295,32 @@ ApiCoord VideoWindow::apiCoordForCursor(const QPoint& globalPos) const {
     // gap; transformFor clamps cleanly in either case).
     for (const auto& sib : m_siblings) {
         if (!sib || sib.data() == this) continue;
-        if (sib->frameGeometry().contains(globalPos)) {
-            return sib->transformFor(globalPos);
-        }
+        if (sib->frameGeometry().contains(globalPos)) return sib.data();
     }
-    return transformFor(globalPos);
+    return const_cast<VideoWindow*>(this);
+}
+
+ApiCoord VideoWindow::apiCoordForCursor(const QPoint& globalPos) const {
+    return windowForCursor(globalPos)->transformFor(globalPos);
+}
+
+void VideoWindow::setSessionCapture(bool active) {
+    if (m_sessionCaptured == active) return;
+    m_sessionCaptured = active;
+    if (!active) m_captureFocus = false;
+    emit captureStatusChanged(m_sessionCaptured, m_captureFocus);
+}
+
+void VideoWindow::setCaptureFocus(bool focused) {
+    if (m_captureFocus == focused) return;
+    m_captureFocus = focused;
+    emit captureStatusChanged(m_sessionCaptured, m_captureFocus);
+}
+
+void VideoWindow::updateCaptureFocus(VideoWindow* w) {
+    if (m_focusWindow == w) return;
+    m_focusWindow = w;
+    for (auto* win : sessionWindows()) win->setCaptureFocus(win == w);
 }
 
 ApiCoord VideoWindow::transformFor(const QPoint& globalPos) const {
@@ -320,6 +366,9 @@ void VideoWindow::setLatencyLabel(const QString& latency) {
 void VideoWindow::setVideoStats(const QString& stats) {
     m_statsLabel->setText(QStringLiteral("video: %1").arg(stats));
 }
+void VideoWindow::setResolutionLabel(const QString& text) {
+    m_resLabel->setText(text);
+}
 
 // ---------------------------------------------------------------------------
 
@@ -354,8 +403,14 @@ void VideoWindow::startCapture() {
     // barriers — no warp, no grab feedback, so it can't stall the event loop.
     m_confiner.confineToBounds(sessionWindowRects());
 
+    // Flag every session window (this one included) as captured, so a
+    // sibling acts on wheel events Qt hands it directly, and park the
+    // capture badge on whichever window the cursor is actually over.
+    for (auto* win : sessionWindows()) win->setSessionCapture(true);
+    m_focusWindow = nullptr;
+    updateCaptureFocus(windowForCursor(QCursor::pos()));
+
     qCInfo(lcHid) << "capture started";
-    emit captureStateChanged(true);
 }
 
 void VideoWindow::stopCapture() {
@@ -381,8 +436,10 @@ void VideoWindow::stopCapture() {
     m_pulseStep = 0;
     QApplication::restoreOverrideCursor();
 
+    m_focusWindow = nullptr;
+    for (auto* win : sessionWindows()) win->setSessionCapture(false);
+
     qCInfo(lcHid) << "capture released";
-    emit captureStateChanged(false);
 }
 
 void VideoWindow::closeEvent(QCloseEvent* ev) {
@@ -402,6 +459,21 @@ void VideoWindow::closeEvent(QCloseEvent* ev) {
 // ---------------------------------------------------------------------------
 
 bool VideoWindow::eventFilter(QObject* watched, QEvent* event) {
+    // Wheel events are accepted from either watched object: m_video when the
+    // cursor is over our own video area, and `this` when the grab routed an
+    // out-of-bounds wheel to the window root (see the installEventFilter
+    // comment in the constructor). Only one of the two fires per event —
+    // handleWheel returns true while captured, which stops propagation.
+    if (event->type() == QEvent::Wheel) {
+        return handleWheel(static_cast<QWheelEvent*>(event));
+    }
+
+    // Everything else stays scoped to the video widget. Mouse coordinates in
+    // handleMouseButton are compared against m_video->rect(), which is
+    // 0-based — a menubar click on the window root would pass that test and
+    // wrongly start capture.
+    if (watched != m_video) return QMainWindow::eventFilter(watched, event);
+
     switch (event->type()) {
         case QEvent::MouseButtonPress:
             return handleMouseButton(static_cast<QMouseEvent*>(event), true);
@@ -409,8 +481,6 @@ bool VideoWindow::eventFilter(QObject* watched, QEvent* event) {
             return handleMouseButton(static_cast<QMouseEvent*>(event), false);
         case QEvent::MouseMove:
             return handleMouseMove(static_cast<QMouseEvent*>(event));
-        case QEvent::Wheel:
-            return handleWheel(static_cast<QWheelEvent*>(event));
         case QEvent::KeyPress:
             return handleKey(static_cast<QKeyEvent*>(event), true);
         case QEvent::KeyRelease:
@@ -466,7 +536,12 @@ QList<QRect> VideoWindow::sessionWindowRects() const {
 
 bool VideoWindow::handleMouseMove(QMouseEvent* ev) {
     if (!m_captured) return false;
-    const auto api  = apiCoordForCursor(ev->globalPosition().toPoint());
+    const QPoint    global = ev->globalPosition().toPoint();
+    VideoWindow*    host   = windowForCursor(global);
+    // Badge follows the pointer. Early-outs on an unchanged focus window, so
+    // this stays cheap on a 1 kHz move stream.
+    updateCaptureFocus(host);
+    const auto api  = host->transformFor(global);
     m_pendingMouseX = api.x;
     m_pendingMouseY = api.y;
     m_mousePending  = true;
@@ -511,7 +586,13 @@ void VideoWindow::stepPulse() {
 }
 
 bool VideoWindow::handleWheel(QWheelEvent* ev) {
-    if (!m_captured) return false;
+    // Gated on the *session*, not on this window owning the grab: Qt may
+    // deliver the wheel to whichever window the cursor is over, which is
+    // often not the holder. The notch carries no position — the target
+    // scrolls wherever its cursor already is, put there by the move stream
+    // — and every window's mouseWheel signal routes to the same HID master,
+    // so any session window may emit it. See DESIGN.md §10.7.
+    if (!m_captured && !m_sessionCaptured) return false;
     // PiKVM accepts signed-int wheel deltas and clamps internally. QWheel's
     // angleDelta is in 1/8-degrees; one notch = 120. Stepped mice deliver
     // ±120 per notch in a single event, but high-resolution wheels and

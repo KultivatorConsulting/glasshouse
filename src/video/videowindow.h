@@ -78,6 +78,16 @@ public:
     // "hidden"; color = "#RRGGBB"; size = ring outer diameter (px).
     void setCursorMarker(const QString& style, const QString& color, int size);
 
+    // Marks a session-wide capture as active/inactive on *this* window.
+    // The holder sets it on every session window (including itself) when
+    // capture starts and stops, so non-holder windows know to act on the
+    // input Qt delivers to them directly — see handleWheel.
+    void setSessionCapture(bool active);
+
+    // Marks this window as the one the cursor is currently over during a
+    // session capture, so the status badge can follow the pointer.
+    void setCaptureFocus(bool focused);
+
 public slots:
     void setConnectionStatus(const QString& text);
     void setDecoderLabel(const QString& decoder);
@@ -86,6 +96,10 @@ public slots:
     // drops), updated on a poll timer by main.cpp. Distinct from the latency
     // label, which holds the one-shot auth-to-first-frame time.
     void setVideoStats(const QString& stats);
+    // Capture resolution readout, plus any mismatch-against-config warning.
+    // Written only by main.cpp, which is the only place that can compare
+    // every window's actual resolution against the configured layout.
+    void setResolutionLabel(const QString& text);
 
     // Public so the multi-window single-capture enforcement in main.cpp
     // can release this window's capture when a sibling claims one.
@@ -93,7 +107,11 @@ public slots:
     void stopCapture();
 
 signals:
-    void captureStateChanged(bool captured);
+    // `sessionActive` is true while any window in the session holds capture;
+    // `focused` is true only on the window the cursor is currently over. The
+    // pair lets main.cpp show the capture badge on the window being worked
+    // in rather than on whichever one happened to start the capture.
+    void captureStatusChanged(bool sessionActive, bool focused);
     // Coordinates are already in PiKVM s16 API space; main.cpp forwards
     // them straight to PiKvmClient::sendMouseMove.
     void mouseMoved(int api_x, int api_y);
@@ -137,6 +155,18 @@ private:
     // session, just routed through whichever window's transform fits.
     ApiCoord apiCoordForCursor(const QPoint& globalPos) const;
 
+    // The session window whose frame contains globalPos, or self when the
+    // cursor is over none of them (a gap, or our own window).
+    VideoWindow* windowForCursor(const QPoint& globalPos) const;
+
+    // Holder-side: move the capture badge to `w`, clearing it everywhere
+    // else. Cheap no-op when the focused window hasn't changed.
+    void updateCaptureFocus(VideoWindow* w);
+
+    // Every window in the session, including self. m_siblings is populated
+    // that way by main.cpp; falls back to just self if it's empty.
+    QList<VideoWindow*> sessionWindows() const;
+
     // frameGeometry() of every session window (self + siblings) in global
     // coords — the region the pointer is confined to during capture.
     QList<QRect> sessionWindowRects() const;
@@ -151,6 +181,7 @@ private:
     QLabel*       m_decoderLabel  = nullptr;
     QLabel*       m_latencyLabel  = nullptr;
     QLabel*       m_statsLabel    = nullptr;
+    QLabel*       m_resLabel      = nullptr;
 
     QString       m_persistHost;
     QRect         m_targetMonitor;
@@ -160,7 +191,17 @@ private:
     int           m_fullscreenHotkey   = 0;
     int           m_specialKeysHotkey  = 0;
 
+    // m_captured: this window owns the Qt grabs (it is the holder).
+    // m_sessionCaptured: *some* window in the session is the holder — true
+    // on the holder too. Qt delivers wheel events without consulting the
+    // mouse grabber (unlike moves/buttons), so a non-holder window has to
+    // act on the wheel events it receives directly; see handleWheel.
     bool          m_captured         = false;
+    bool          m_sessionCaptured  = false;
+    bool          m_captureFocus     = false;
+
+    // Holder-side bookkeeping for updateCaptureFocus.
+    QPointer<VideoWindow> m_focusWindow;
 
     // Confines the pointer to the session windows while captured (X11).
     PointerConfiner m_confiner;
