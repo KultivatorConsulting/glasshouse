@@ -479,6 +479,46 @@ void PiKvmClient::msdUpload(const QString& imageName, QIODevice* file) {
     });
 }
 
+QNetworkReply* PiKvmClient::ocrRegion(const QRect& rect,
+                                      const QStringList& langs,
+                                      int timeoutMs) {
+    if (m_authCookie.isEmpty()) {
+        qCWarning(lcPikvm) << m_opts.host
+                           << "ocrRegion before authenticated — dropped";
+        return nullptr;
+    }
+
+    QUrl url(QStringLiteral("https://%1/api/streamer/snapshot").arg(m_opts.host));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("ocr"), QStringLiteral("1"));
+    if (!langs.isEmpty()) {
+        // kvmd takes a single comma-separated value, not repeated keys.
+        q.addQueryItem(QStringLiteral("ocr_langs"),
+                       langs.join(QLatin1Char(',')));
+    }
+    if (!rect.isNull() && rect.isValid()) {
+        // kvmd wants edges, not an origin and a size, and treats them as
+        // inclusive-left/exclusive-right — which is what QRect::right()+1
+        // means, so use x()+width() rather than QRect's inclusive right().
+        q.addQueryItem(QStringLiteral("ocr_left"),   QString::number(rect.x()));
+        q.addQueryItem(QStringLiteral("ocr_top"),    QString::number(rect.y()));
+        q.addQueryItem(QStringLiteral("ocr_right"),
+                       QString::number(rect.x() + rect.width()));
+        q.addQueryItem(QStringLiteral("ocr_bottom"),
+                       QString::number(rect.y() + rect.height()));
+    }
+    url.setQuery(q);
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(timeoutMs);
+    QNetworkReply* reply = m_nam->get(req);
+    if (m_opts.insecure_tls) {
+        connect(reply, &QNetworkReply::sslErrors,
+                reply, qOverload<>(&QNetworkReply::ignoreSslErrors));
+    }
+    return reply;
+}
+
 void PiKvmClient::atxClick(const QString& button) {
     if (m_authCookie.isEmpty()) {
         qCWarning(lcPikvm) << m_opts.host

@@ -336,39 +336,61 @@ system instead of a model that already works.
 
 ### 6.1 The remote half is pluggable
 
-Region extraction (DESIGN.md §10.10) currently constructs a `TuiClient`
+Region extraction (DESIGN.md §10.10) used to construct a `TuiClient`
 directly. That was right for one feature on one workstation and wrong as
-the only
-option in a public LGPL-3.0 repository: a clone that does nothing
-without a Kultivator API key is a poor artifact, and it leaves the
+the only option in a public LGPL-3.0 repository: a clone that does
+nothing without a Kultivator API key is a poor artifact, and it left the
 privacy row in §11 with no mitigation but "the user chose the
 rectangle".
 
-So extraction goes behind an interface. `TuiClient` already has exactly
-the right surface — `extractText(QByteArray png)`, `busy()`, `cancel()`,
-`finished(ok, text, reason)` — so this is a rename and a base class, not
-a redesign.
+So extraction went behind an interface. `TuiClient` already had the
+right surface — take a selection, say whether it is busy, cancel,
+report `finished(ok, text, reason)` once — so this was a rename and a
+base class rather than a redesign.
+
+**Built 2026-10-12.** `TextExtractor` is the interface; DESIGN.md
+§10.10 has the implementation notes.
 
 | provider | covers | cost |
 |---|---|---|
-| `none` | default for a fresh clone; the hotkey reports that nothing is configured | nil |
+| `none` | off; the hotkey selects and reports that nothing is configured | nil |
+| `pikvm` | the PiKVM's own Tesseract, over a rectangle of the frame it already serves | nil — and the image never leaves the LAN |
 | `command` | any host tool, fed PNG on stdin, text from stdout | nil — no build or runtime dependency |
-| `openai` | Tui, OpenAI, Ollama, vLLM, LM Studio — anything with `/v1/chat/completions` and `image_url` parts | the existing code, renamed |
+| `openai` | OpenAI, Ollama, vLLM, LM Studio — anything with `/v1/chat/completions` and `image_url` parts | the existing code, renamed |
+| `tui` | the same wire shape at Kultivator's endpoint, `X-API-Key` rather than Bearer | the existing code |
 
-**Three providers rather than four.** "Built-in OCR" and "the host's
-OCR" collapse into `command`, because the generic form of host OCR on
-Linux *is* a subprocess — there is no system OCR service to call, the
-way macOS and Windows have one. Tesseract is in noble (5.3.4; about
-8 MB with `libtesseract5` and the English data) and reads stdin to
-stdout as `tesseract - -`, so local OCR becomes one line of
-configuration instead of a linked dependency that every install carries
-whatever provider it uses. Link `libtesseract` later only if the
-subprocess hop proves to matter.
+**`pikvm` was the surprise, and it changes the default.** This section
+originally proposed `none` as the fallback for a fresh clone, on the
+reasoning that a clone doing nothing without a Kultivator key is a poor
+artifact. Checking the firmware turned out better than that: stock kvmd
+answers `/api/streamer/ocr` with `enabled: true` and ships `eng`, and
+`GET /api/streamer/snapshot?ocr=1&ocr_left=…` returns `text/plain`. So
+a fresh clone with no `ocr:` block at all gets working extraction, with
+no install anywhere and no egress — which is also the mitigation §11
+wanted for the privacy row, not just "the user chose the rectangle".
 
-**Tui stops being special**: it becomes `provider: openai` plus the
-endpoint, key and model fields the `ocr:` block already has. Existing
-configurations keep working — default the provider to `openai` when an
-`api_key` is set and `none` otherwise, and nothing needs migrating.
+The cost is latency, because it is Tesseract on a Pi: measured 2 s for
+300×100, 11 s for 890×320, and a 504 at 60 s for a whole 1920×1080
+frame. Region-scoped use is fine; whole-screen is not, which the
+rectangle-based feature happens to guarantee.
+
+**"Built-in OCR" and "the host's OCR" still collapse into `command`**,
+because the generic form of host OCR on Linux *is* a subprocess — there
+is no system OCR service to call, the way macOS and Windows have one.
+Tesseract is in noble (5.3.4; about 8 MB with `libtesseract5` and the
+English data) and reads stdin to stdout as `tesseract - -`, so local OCR
+is one line of configuration instead of a linked dependency that every
+install carries whatever provider it uses. Link `libtesseract` later
+only if the subprocess hop proves to matter.
+
+**Tui stays its own value rather than folding into `openai`**, which is
+a change from what this section first said. The wire shape is identical,
+but the auth header is not — `X-API-Key` against `Authorization:
+Bearer` — so one of them has to be named anyway, and naming both reads
+better in a config file than `openai` plus an endpoint nobody
+recognises. One class serves both. Existing configurations keep working:
+an `api_key` with no `provider` resolves to `tui`, which is what it
+meant when Tui's endpoint was the only default there was.
 
 #### What degrades without a provider
 

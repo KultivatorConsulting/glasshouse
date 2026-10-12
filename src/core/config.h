@@ -52,26 +52,70 @@ struct VideoSpec {
     int     cursor_marker_size  = 24;
 };
 
-// Region-capture text extraction: the hotkey grabs a rectangle of the
-// frozen video frame, sends it to Tui, and puts the reply on the host
-// clipboard. See DESIGN.md §10.10. `api_key` takes a `secret://<name>`
-// reference resolved through SecretResolver, so the key itself never
-// appears in config.yaml.
+// Which backend turns a region of the target's screen into text.
+//
+// Four of them, because they differ in what they cost the user, not
+// just in implementation: `pikvm` needs nothing installed anywhere and never
+// leaves the LAN; `command` needs a host tool but no account; `openai`
+// and `tui` need an API key and send the image to a third party. A
+// public clone should work out of the box, which is why `pikvm` is the
+// fallback rather than `none`.
+enum class OcrProvider {
+    None,     // explicitly off; the region hotkey selects but reports nothing
+    Pikvm,    // the PiKVM's own Tesseract, via /api/streamer/snapshot?ocr=1
+    Command,  // any host tool: PNG on stdin, text on stdout
+    OpenAi,   // /v1/chat/completions with Authorization: Bearer
+    Tui,      // same shape, Kultivator's endpoint, X-API-Key
+};
+
+QString   ocrProviderName(OcrProvider p);
+// Returns false and sets `error` for an unrecognised name.
+bool      parseOcrProvider(const QString& name, OcrProvider* out,
+                           QString* error);
+
+// Region capture → text → clipboard. See DESIGN.md §10.10. `api_key`
+// takes a `secret://<name>` reference resolved through SecretResolver,
+// so the key itself never appears in config.yaml.
 struct OcrSpec {
-    QString endpoint = QStringLiteral(
-        "https://chat.kultivator.net.nz/v1/chat/completions");
-    QString api_key;                                  // secret:// ref
+    // Unset in YAML means "work it out": `tui` when an api_key is set
+    // (what every config written before providers existed meant), and
+    // `pikvm` otherwise, since that needs no configuration at all.
+    OcrProvider provider      = OcrProvider::Pikvm;
+    bool        provider_explicit = false;
+
+    // --- provider: pikvm -------------------------------------------
+    // Languages to pass as ocr_langs. The PiKVM reports what it has at
+    // /api/streamer/ocr; stock firmware ships `eng` and `osd`.
+    QStringList langs = {QStringLiteral("eng")};
+
+    // --- provider: command -----------------------------------------
+    // argv, run with the PNG on stdin and the text read from stdout.
+    // Empty means unconfigured, which validation rejects.
+    QStringList command;
+
+    // --- provider: openai | tui ------------------------------------
+    QString endpoint;        // defaulted per provider when left unset
+    QString api_key;         // secret:// ref
     QString model            = QStringLiteral("auto");
     // Reasoning is pure cost for transcription, and it eats the token
     // budget — Tui answers 200 with empty content when it runs out.
     QString reasoning_effort = QStringLiteral("none");
     int     max_tokens       = 8000;
-    int     timeout_ms       = 60000;
     // Default asks for a verbatim transcription, because the result goes
     // straight to the clipboard and a description isn't pasteable. Set
     // this to ask for something else (a summary, a description, JSON).
     QString prompt = QStringLiteral(
         "Transcribe every piece of text visible in this image exactly as it appears, preserving reading order and line breaks. Output only the transcribed text: no commentary, no headings, no code fences. If the image contains no text, output nothing.");
+
+    // --- all providers ---------------------------------------------
+    // Generous on purpose: PiKVM-side OCR of a 890x320 region measured
+    // 11 s on a PiKVM 3, and nginx in front of kvmd gives up at 60.
+    int timeout_ms = 60000;
+
+    static constexpr auto kTuiEndpoint =
+        "https://chat.kultivator.net.nz/v1/chat/completions";
+    static constexpr auto kOpenAiEndpoint =
+        "https://api.openai.com/v1/chat/completions";
 };
 
 // Local MCP server (DESIGN.md §10.11): exposes the running session — screen

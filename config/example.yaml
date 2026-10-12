@@ -44,36 +44,51 @@ paste_hotkey:        "Ctrl+Alt+Shift+V"
 # Tui, and put the result on the host clipboard. Needs ocr.api_key below.
 region_hotkey:       "Ctrl+Alt+Shift+C"
 
-# Region-capture text extraction (see region_hotkey). Everything except
-# api_key is optional; the defaults shown are what the viewer uses.
+# Region-capture text extraction (see region_hotkey).
+#
+# provider picks what does the work. Left unset it resolves to `tui`
+# when api_key is set (what a config written before providers existed
+# meant) and `pikvm` otherwise.
+#
+#   pikvm    The PiKVM's own Tesseract. Nothing to install anywhere, and
+#            the image never leaves the LAN. Stock firmware ships it
+#            enabled — check with GET /api/streamer/ocr. Keep selections
+#            small: a 300x100 region takes ~2 s on a PiKVM 3, 890x320
+#            takes ~11 s, and a full 1920x1080 frame times out at 60 s.
+#   command  Any host program: PNG on stdin, text on stdout. Install
+#            tesseract-ocr (~8 MB on noble) and point `command` at it.
+#   openai   Any OpenAI-compatible /v1/chat/completions, authenticated
+#            with `Authorization: Bearer`. Reads screens far better than
+#            Tesseract. Also how you reach a local Ollama / vLLM /
+#            LM Studio — set `endpoint` and the key it expects.
+#   tui      Kultivator's endpoint, authenticated with `X-API-Key`.
+#   none     Off. The region hotkey still selects, and reports that
+#            nothing is configured.
+#
+# The model-backed providers send the selected image to a third party.
+# `pikvm` and `command` do not.
 ocr:
-  api_key: "secret://tui-api-key"   # resolved via secrets.yaml or
-                                    # GLASSHOUSE_SECRET_TUI_API_KEY
-  # endpoint: "https://chat.kultivator.net.nz/v1/chat/completions"
-  # model: "auto"
-  # reasoning_effort: "none"        # transcription needs no reasoning
-  # max_tokens: 8000                # below this the model can return
-                                    # 200 with empty content
-  # timeout_ms: 60000
-  # prompt: "..."                   # default asks for verbatim text
+  provider: pikvm
 
-video:
-  prefer_hw_decode: true
-  # NOTE: target_fps is currently NOT enforced on the MJPEG path. The
-  # client-side videorate cap was a no-op on ustreamer's untimestamped stream
-  # (it only added latency) and was removed; frames are governed by the leaky
-  # queue instead. Kept for forward-compat; has no effect today.
-  target_fps: 30
-  # Janus/H.264 jitterbuffer dwell (ms). webrtcbin's default is 200, tuned
-  # for lossy internet; on the LAN a PiKVM lives on that's pure added lag.
-  # Lower = less video latency, less tolerance for jitter/loss. 50–100 suits
-  # a wired LAN; raise toward 200 on flaky Wi-Fi. (Janus transport only.)
-  webrtc_latency_ms: 100
-  # Capture cursor marker: a zero-lag local pointer drawn while captured that
-  # the (laggy) guest cursor converges to. style: ring | crosshair | hidden.
-  cursor_marker: ring
-  cursor_marker_color: "#FFA000"
-  cursor_marker_size: 24
+  # provider: pikvm — languages to ask for. The PiKVM lists what it has
+  # at /api/streamer/ocr; stock firmware has eng and osd.
+  langs: ["eng"]
+
+  # provider: command — argv, run with the PNG on stdin.
+  # command: ["tesseract", "-", "-"]
+
+  # provider: openai | tui
+  # api_key: "secret://tui-api-key"  # resolved via secrets.yaml or
+  #                                  # GLASSHOUSE_SECRET_TUI_API_KEY
+  # endpoint: "..."                  # defaults per provider
+  # model: "auto"
+  # reasoning_effort: "none"         # transcription needs no reasoning
+  # max_tokens: 8000                 # below this the model can return
+  #                                  # 200 with empty content
+  # prompt: "..."                    # default asks for verbatim text
+
+  # All providers. Generous on purpose — PiKVM-side OCR is not fast.
+  timeout_ms: 60000
 
 # Local MCP server (DESIGN.md §10.11). Exposes the running session to any
 # MCP client: screen indexes, the combined desktop, screenshots, typing,

@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
+#include <QRect>
 #include <QString>
 #include <QStringList>
 #include <memory>
@@ -112,6 +113,25 @@ public:
     void msdSetParams(const QString& image, bool cdrom, bool rw);
     void msdRemove(const QString& image);
     void msdUpload(const QString& imageName, QIODevice* file);
+
+    // The PiKVM's own OCR, over a rectangle of the frame it is serving
+    // right now: `GET /api/streamer/snapshot?ocr=1&ocr_langs=…` plus the
+    // bounding box, answering `text/plain`. Stock firmware has it
+    // enabled with `eng` and `osd` — nothing to install, and the image
+    // never leaves the LAN.
+    //
+    // `rect` is in the streamer's own capture pixels, which is the
+    // coordinate space of the decoded frame the viewer already holds.
+    // Keep it small: a 300x100 region measured 2 s on a PiKVM 3, an
+    // 890x320 region 11 s, and a full 1920x1080 frame exceeded the
+    // 60 s nginx timeout in front of kvmd.
+    //
+    // Returns the in-flight reply so the caller can read, abort and own
+    // it, or null when called before authentication. The reply is
+    // parented to this client's network manager — delete it with
+    // deleteLater() when done.
+    QNetworkReply* ocrRegion(const QRect& rect, const QStringList& langs,
+                             int timeoutMs);
 
 signals:
     void authenticated();

@@ -163,7 +163,11 @@ signals:
     void pasteClipboardRequested();
     // A region of the frozen video frame, cropped and in frame pixels.
     // main.cpp owns what happens next (encode, send to Tui, clipboard).
-    void regionCaptured(const QImage& image);
+    // The crop the user dragged, plus where it came from in the frame's
+    // own pixels. Both, because the extraction providers want different
+    // things: a model or a host tool reads the image, while the PiKVM's
+    // own OCR takes a rectangle and reads its own live frame.
+    void regionCaptured(const QImage& image, const QRect& frameRect);
     // The user asked to stop the long-running work this window is
     // showing a spinner for (by pressing the hotkey again).
     void busyCancelRequested();

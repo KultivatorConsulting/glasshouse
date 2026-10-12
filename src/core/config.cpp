@@ -26,6 +26,35 @@ T yamlScalarOr(const YAML::Node& node, const char* key, T fallback) {
 
 }  // namespace
 
+QString ocrProviderName(OcrProvider p) {
+    switch (p) {
+        case OcrProvider::None:    return QStringLiteral("none");
+        case OcrProvider::Pikvm:   return QStringLiteral("pikvm");
+        case OcrProvider::Command: return QStringLiteral("command");
+        case OcrProvider::OpenAi:  return QStringLiteral("openai");
+        case OcrProvider::Tui:     return QStringLiteral("tui");
+    }
+    return QStringLiteral("none");
+}
+
+bool parseOcrProvider(const QString& name, OcrProvider* out, QString* error) {
+    const QString n = name.trimmed().toLower();
+    if      (n == QLatin1String("none"))    *out = OcrProvider::None;
+    else if (n == QLatin1String("pikvm"))   *out = OcrProvider::Pikvm;
+    else if (n == QLatin1String("command")) *out = OcrProvider::Command;
+    else if (n == QLatin1String("openai"))  *out = OcrProvider::OpenAi;
+    else if (n == QLatin1String("tui"))     *out = OcrProvider::Tui;
+    else {
+        if (error) {
+            *error = QStringLiteral(
+                "ocr.provider '%1' is not one of: none, pikvm, command, "
+                "openai, tui").arg(name);
+        }
+        return false;
+    }
+    return true;
+}
+
 QStringList validateConfig(const Config& cfg) {
     QStringList errors;
 
@@ -74,6 +103,36 @@ QStringList validateConfig(const Config& cfg) {
                 .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height())
                 .arg(desktop.width()).arg(desktop.height()));
         }
+    }
+
+    // 6. the chosen OCR provider has what it needs. Checked here rather
+    // than at use so a typo in `command` is a startup error, not a
+    // surprise the first time someone drags a rectangle.
+    switch (cfg.ocr.provider) {
+        case OcrProvider::Command:
+            if (cfg.ocr.command.isEmpty()) {
+                errors.append(QStringLiteral(
+                    "ocr.provider is 'command' but ocr.command is empty — "
+                    "give the argv to run, e.g. [tesseract, '-', '-']"));
+            }
+            break;
+        case OcrProvider::OpenAi:
+        case OcrProvider::Tui:
+            if (cfg.ocr.api_key.isEmpty()) {
+                errors.append(QStringLiteral(
+                    "ocr.provider is '%1' but ocr.api_key is unset")
+                    .arg(ocrProviderName(cfg.ocr.provider)));
+            }
+            break;
+        case OcrProvider::Pikvm:
+            if (cfg.ocr.langs.isEmpty()) {
+                errors.append(QStringLiteral(
+                    "ocr.langs is empty; the PiKVM needs at least one "
+                    "language (stock firmware has 'eng')"));
+            }
+            break;
+        case OcrProvider::None:
+            break;
     }
 
     // 5. monitor rects must not overlap
@@ -214,8 +273,28 @@ ConfigResult loadConfig(const QString& path) {
     // block still yields a working Tui configuration bar the API key.
     if (const auto o = root["ocr"]; o) {
         const OcrSpec d;
-        cfg.ocr.endpoint = QString::fromStdString(yamlScalarOr<std::string>(
-            o, "endpoint", d.endpoint.toStdString()));
+        if (const QString name = yamlString(o, "provider"); !name.isEmpty()) {
+            QString why;
+            if (parseOcrProvider(name, &cfg.ocr.provider, &why)) {
+                cfg.ocr.provider_explicit = true;
+            } else {
+                result.errors.append(why);
+            }
+        }
+        if (const auto l = o["langs"]; l && l.IsSequence()) {
+            cfg.ocr.langs.clear();
+            for (const auto& n : l) {
+                cfg.ocr.langs.append(
+                    QString::fromStdString(n.as<std::string>("")));
+            }
+        }
+        if (const auto c = o["command"]; c && c.IsSequence()) {
+            for (const auto& n : c) {
+                cfg.ocr.command.append(
+                    QString::fromStdString(n.as<std::string>("")));
+            }
+        }
+        cfg.ocr.endpoint = yamlString(o, "endpoint");
         cfg.ocr.api_key  = yamlString(o, "api_key");
         cfg.ocr.model    = QString::fromStdString(yamlScalarOr<std::string>(
             o, "model", d.model.toStdString()));
@@ -226,6 +305,22 @@ ConfigResult loadConfig(const QString& path) {
         cfg.ocr.timeout_ms = yamlScalarOr<int>(o, "timeout_ms", d.timeout_ms);
         cfg.ocr.prompt     = QString::fromStdString(yamlScalarOr<std::string>(
             o, "prompt", d.prompt.toStdString()));
+    }
+
+    // Provider defaulting, after parsing so an explicit `provider:` always
+    // wins. A config written before providers existed set `api_key` and
+    // meant Tui, because Tui's endpoint was the only default there was;
+    // anything else means the PiKVM's own OCR, which costs nothing to try.
+    if (!cfg.ocr.provider_explicit) {
+        cfg.ocr.provider = cfg.ocr.api_key.isEmpty() ? OcrProvider::Pikvm
+                                                     : OcrProvider::Tui;
+    }
+    if (cfg.ocr.endpoint.isEmpty()) {
+        if (cfg.ocr.provider == OcrProvider::Tui) {
+            cfg.ocr.endpoint = QString::fromUtf8(OcrSpec::kTuiEndpoint);
+        } else if (cfg.ocr.provider == OcrProvider::OpenAi) {
+            cfg.ocr.endpoint = QString::fromUtf8(OcrSpec::kOpenAiEndpoint);
+        }
     }
 
     // mcp — all optional; absent block leaves the server disabled.

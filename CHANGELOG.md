@@ -5,6 +5,44 @@ All notable changes to Glasshouse Viewer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Four OCR providers behind `ocr.provider`**, so text extraction no
+  longer requires a Kultivator API key:
+  - `pikvm` — the PiKVM's own OCR, over a rectangle of the frame it is
+    already serving. Needs nothing installed on the host or the PiKVM
+    (stock firmware reports `enabled: true` with `eng` and `osd` at
+    `/api/streamer/ocr`), and the image never leaves the LAN. **The new
+    default**, so a fresh clone extracts text with no configuration at
+    all. Keep selections small: measured on a PiKVM 3, a 300×100 region
+    takes about 2 s, 890×320 about 11 s, and a whole 1920×1080 frame
+    exceeds the 60 s timeout kvmd sits behind.
+  - `command` — any host program, PNG on stdin, text from stdout.
+    `["tesseract", "-", "-"]` is about 8 MB on noble. Nothing is linked
+    against it, so other installs carry no dependency.
+  - `openai` — any OpenAI-compatible `/v1/chat/completions` with
+    `Authorization: Bearer`, which also covers a local Ollama, vLLM or
+    LM Studio via `endpoint`.
+  - `tui` — the same wire shape at Kultivator's endpoint with
+    `X-API-Key`.
+
+  `none` turns extraction off while leaving the selector usable.
+  Existing configurations are unaffected: an `ocr.api_key` with no
+  `provider` still resolves to `tui`, and there is a test pinning that.
+
+### Changed
+- **`TuiClient` is now `OpenAiExtractor`, behind a `TextExtractor`
+  interface** shared by all four providers. The surface is the one
+  `TuiClient` already had, because that is what the spinner needs
+  whatever is doing the work.
+- **`VideoWindow::regionCaptured` carries the source rectangle** as
+  well as the cropped image. The PiKVM provider does not take an
+  upload — it OCRs its own live frame and wants a bounding box — so the
+  two forms of the same selection both have to reach the extractor. One
+  consequence: that provider reads the screen as it is when the request
+  lands, while the others read the still the user froze.
+
 ## [0.1.4] - 2026-10-12
 
 ### Added

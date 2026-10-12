@@ -1,4 +1,4 @@
-#include "tuiclient.h"
+#include "openaiextractor.h"
 
 #include "logging.h"
 
@@ -8,24 +8,48 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QUrl>
 
 namespace glasshouse {
 
-TuiClient::TuiClient(Options opts, QObject* parent)
-    : QObject(parent), m_opts(std::move(opts)),
+OpenAiExtractor::OpenAiExtractor(Options opts, QObject* parent)
+    : TextExtractor(parent), m_opts(std::move(opts)),
       m_nam(std::make_unique<QNetworkAccessManager>()) {}
 
-TuiClient::~TuiClient() = default;
+OpenAiExtractor::~OpenAiExtractor() = default;
 
-void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
+bool OpenAiExtractor::configured(QString* why) const {
+    if (m_opts.endpoint.isEmpty()) {
+        if (why) {
+            *why = QStringLiteral("ocr.endpoint is unset");
+        }
+        return false;
+    }
+    if (m_opts.apiKey.isEmpty()) {
+        if (why) {
+            *why = QStringLiteral("ocr.api_key is unset or did not resolve");
+        }
+        return false;
+    }
+    return true;
+}
+
+QString OpenAiExtractor::describe() const {
+    return QStringLiteral("%1 (%2, model %3)")
+        .arg(m_opts.label, QUrl(m_opts.endpoint).host(), m_opts.model);
+}
+
+void OpenAiExtractor::extract(const ExtractRequest& reqIn) {
+    const QByteArray& pngBytes = reqIn.png;
+    const QString&    prompt   = reqIn.prompt;
+
     if (busy()) {
         emit finished(false, QString(),
                       QStringLiteral("an extraction is already running"));
         return;
     }
-    if (!configured()) {
-        emit finished(false, QString(),
-                      QStringLiteral("no Tui endpoint/API key configured"));
+    if (QString why; !configured(&why)) {
+        emit finished(false, QString(), why);
         return;
     }
     if (pngBytes.isEmpty()) {
@@ -58,11 +82,15 @@ void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
     QNetworkRequest req(QUrl(m_opts.endpoint));
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/json"));
-    req.setRawHeader("X-API-Key", m_opts.apiKey.toUtf8());
+    if (m_opts.auth == Auth::Bearer) {
+        req.setRawHeader("Authorization", "Bearer " + m_opts.apiKey.toUtf8());
+    } else {
+        req.setRawHeader("X-API-Key", m_opts.apiKey.toUtf8());
+    }
     req.setTransferTimeout(m_opts.timeoutMs);
 
     const QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
-    qCInfo(lcOcr) << "tui: requesting text extraction," << pngBytes.size()
+    qCInfo(lcOcr) << m_opts.label << ": requesting text extraction," << pngBytes.size()
                   << "byte PNG," << payload.size() << "byte request";
 
     QNetworkReply* reply = m_nam->post(req, payload);
@@ -74,7 +102,7 @@ void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
         if (reply->error() == QNetworkReply::OperationCanceledError) {
             // Either the user cancelled or the transfer timeout fired;
             // both mean the same thing to the caller.
-            qCInfo(lcOcr) << "tui: request cancelled or timed out";
+            qCInfo(lcOcr) << m_opts.label << ": request cancelled or timed out";
             emit finished(false, QString(), QStringLiteral("cancelled"));
             return;
         }
@@ -89,17 +117,21 @@ void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
             // …" tells the user nothing about which knob to reach for.
             QString msg;
             switch (status) {
-                case 401: msg = QStringLiteral("Tui rejected the API key (401)"); break;
-                case 429: msg = QStringLiteral("Tui quota or rate limit (429)"); break;
-                case 422: msg = QStringLiteral("Tui rejected the request (422)"); break;
+                case 401: msg = QStringLiteral("%1 rejected the API key (401)")
+                                    .arg(m_opts.label); break;
+                case 429: msg = QStringLiteral("%1 quota or rate limit (429)")
+                                    .arg(m_opts.label); break;
+                case 422: msg = QStringLiteral("%1 rejected the request (422)")
+                                    .arg(m_opts.label); break;
                 case 400: msg = QStringLiteral("request too large for the context "
                                                "window (400)"); break;
                 default:
                     msg = status >= 500
-                              ? QStringLiteral("Tui upstream error (%1)").arg(status)
+                              ? QStringLiteral("%1 upstream error (%2)")
+                                    .arg(m_opts.label).arg(status)
                               : reply->errorString();
             }
-            qCWarning(lcOcr) << "tui: request failed:" << msg
+            qCWarning(lcOcr) << m_opts.label << ": request failed:" << msg
                              << "body:" << raw.left(400);
             emit finished(false, QString(), msg);
             return;
@@ -134,7 +166,8 @@ void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
             const QString reason = choices.at(0).toObject()
                                        .value(QStringLiteral("finish_reason"))
                                        .toString();
-            qCWarning(lcOcr) << "tui: empty content, finish_reason =" << reason;
+            qCWarning(lcOcr) << m_opts.label << ": empty content, finish_reason ="
+                         << reason;
             emit finished(false, QString(),
                           QStringLiteral("model returned no text (finish_reason=%1)"
                                          " — try a larger max_tokens")
@@ -143,12 +176,12 @@ void TuiClient::extractText(const QByteArray& pngBytes, const QString& prompt) {
             return;
         }
 
-        qCInfo(lcOcr) << "tui: extracted" << text.size() << "chars";
+        qCInfo(lcOcr) << m_opts.label << ": extracted" << text.size() << "chars";
         emit finished(true, text, QString());
     });
 }
 
-void TuiClient::cancel() {
+void OpenAiExtractor::cancel() {
     if (QNetworkReply* reply = m_reply) {
         m_reply = nullptr;
         reply->abort();   // `finished` fires with OperationCanceledError

@@ -537,9 +537,10 @@ re-clicks a window to re-capture.
 ### Phase 9 — Region capture to text — done
 A hotkey (`region_hotkey`, default `Ctrl+Alt+Shift+C`) freezes the
 current video frame of the window **under the pointer**, lets the user
-drag out a rectangle, sends that crop to Tui, and puts the extracted
-text on the host clipboard. `RegionSelector` owns the drag; `TuiClient`
-owns the request; `main.cpp` joins them to the clipboard.
+drag out a rectangle, has it turned into text by the configured
+provider, and puts the result on the host clipboard. `RegionSelector`
+owns the drag; a `TextExtractor` owns the request; `main.cpp` joins them
+to the clipboard.
 
 The window under the pointer is deliberately not the focused window:
 while captured, the hotkey is delivered to whichever window holds the
@@ -1078,16 +1079,51 @@ exclusive right edge, taking every image pixel the selection touches.
 | drag running off the frame | past the edge | clamped inside the image |
 | click, or a nudge under 8 px | — | cancelled, nothing sent |
 
-**One provider, for now.** `TuiClient` is constructed directly, so the
-feature currently requires a Tui key. That is a known limitation rather
-than the intended shape: HARNESS.md §6.1 records the generalisation to
-`none` / `command` / `openai` providers behind the surface `TuiClient`
-already has, with Tui becoming `provider: openai` plus the endpoint and
-model fields the `ocr:` block carries today. Unbuilt.
+**Four providers, behind one interface (built 2026-10-12).** `ocr.provider`
+selects between `pikvm`, `command`, `openai` and `tui`; `TextExtractor`
+is the interface, and it keeps the surface `TuiClient` already had —
+`extract`, `busy`, `cancel`, `finished(ok, text, error)` — because that
+is what the spinner needs regardless of what does the work. Defaulting
+preserves every config written before providers existed: unset resolves
+to `tui` when an `api_key` is present and `pikvm` otherwise.
 
-**Tui specifics.** PNG rather than JPEG, so text edges stay crisp. A
-1920×1080 frame is 2.07 MP, just under the ~2.1 MP above which Tui downscales
+**`ExtractRequest` carries the selection twice, and has to.** The
+model-backed providers and `command` read the cropped PNG. The PiKVM
+does not take an upload at all: `GET /api/streamer/snapshot?ocr=1` plus
+`ocr_left/top/right/bottom` OCRs the frame *it* is serving, so it needs
+a rectangle in capture pixels. The consequence is worth stating — the
+`pikvm` provider reads the screen as it is when the request lands, while
+the others read the still the user froze. On a screen changing under the
+selection they can differ.
+
+**PiKVM OCR is on in stock firmware, and the cost is area (verified
+2026-10-12 against kvmd on a PiKVM 4 Plus and a PiKVM 3).**
+`/api/streamer/ocr` reports `enabled: true` with `eng` and `osd` on both.
+Timings on the PiKVM 3, measured:
+
+| selection | wall time |
+|---|---|
+| 300×100 | 2.0 s |
+| 890×320 | 11.0 s |
+| 1920×1080 (whole frame) | **504 at 60 s** — nginx in front of kvmd gives up |
+
+So this provider is viable precisely because the feature is region-based,
+and `ocr.timeout_ms` defaults to 60 s to match the server's own ceiling.
+A bad `ocr_langs` is a clean 400 with a kvmd `ValidatorError`, which is
+worth surfacing verbatim rather than translating.
+
+Quality is Tesseract's: solid on prose, unreliable on hashes and serial
+numbers — in the verification run it read a git SHA with two characters
+wrong and `+1300` as `+1360`. That is the trade for an image that never
+leaves the LAN, and the reason the model-backed providers stay.
+
+**Tui and OpenAI specifics.** PNG rather than JPEG, so text edges stay crisp.
+A 1920×1080 frame is 2.07 MP, just under the ~2.1 MP above which Tui downscales
 server-side, so even a full-frame selection survives at native resolution.
+The two differ only in endpoint and auth header — `X-API-Key` for Tui,
+`Authorization: Bearer` for OpenAI and the clones — which is why one class
+serves both, and why pointing `endpoint` at a local Ollama or vLLM works
+without new code.
 `reasoning_effort: none` — reasoning is pure latency for transcription, and
 it competes for the token budget: when it exhausts `max_tokens` the server
 answers **200 with empty content and no explanation**, so an empty reply is
@@ -1117,8 +1153,9 @@ marker afterwards, including on a redundant clear.
 
 A second hotkey press while the spinner is up cancels rather than queueing
 another request — after several seconds of waiting, pressing it again is
-impatience, not a new request. `TuiClient::cancel()` aborts the reply and
-still reports `finished`, so the spinner is torn down on exactly one path.
+impatience, not a new request. `TextExtractor::cancel()` abandons the
+request — aborting the reply, or killing the subprocess — and still
+reports `finished`, so the spinner is torn down on exactly one path.
 
 ### 10.11 Local MCP server (verified 2026-10-12)
 

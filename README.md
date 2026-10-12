@@ -48,7 +48,9 @@ What works end-to-end today:
   — `Ctrl+Alt+Shift+V` types the host clipboard onto the target;
   `Ctrl+Alt+Shift+C` drags out a region, extracts its text and puts it
   back on the host clipboard. The two directions a KVM otherwise
-  can't cross.
+  can't cross. Extraction has four backends; the default uses the
+  PiKVM's own OCR, so it works with nothing installed and nothing
+  sent off your network.
 - Mass Storage upload / mount / eject / present-as-CDROM.
 - Target ATX power short-press, long-press (force-off), reset — each
   gated by a confirmation dialog.
@@ -213,30 +215,78 @@ retype by eye off a video stream.
 - On success the flash reads `copied 128 chars to clipboard`; on
   failure it names the error and stays up for eight seconds.
 
-This one needs a provider configured:
+This one needs a provider. There are four, and they differ in what they
+cost you, not just in how they work:
+
+| `ocr.provider` | Needs | Image leaves the LAN? | Quality |
+|---|---|---|---|
+| `pikvm` | nothing — stock firmware has it | no | Tesseract |
+| `command` | a host tool, e.g. `tesseract-ocr` | no | whatever you point it at |
+| `openai` | an API key | yes | reads screens well |
+| `tui` | a Kultivator API key | yes | reads screens well |
+
+**`pikvm` is the default and needs no configuration at all.** The PiKVM
+runs its own Tesseract and will OCR a rectangle of the frame it is
+already serving, so nothing is installed anywhere and the screenshot
+never leaves your network. Confirm your firmware has it with:
+
+```bash
+curl -ks -u admin:PASS https://<pikvm>/api/streamer/ocr
+```
 
 ```yaml
 ocr:
-  api_key: "secret://tui-api-key"   # required
-  # endpoint: "https://chat.kultivator.net.nz/v1/chat/completions"
+  provider: pikvm
+  langs: ["eng"]        # whatever /api/streamer/ocr lists; stock has eng + osd
+```
+
+> **Keep `pikvm` selections small.** OCR runs on the Pi, and the time
+> scales with area: on a PiKVM 3 a 300×100 region took about 2 s, an
+> 890×320 region about 11 s, and a full 1920×1080 frame exceeded the
+> 60 s timeout nginx enforces in front of kvmd and came back 504. The
+> other providers do not have this problem.
+
+**`command`** runs any host program with the PNG on stdin and reads the
+text off stdout. On noble, `sudo apt install tesseract-ocr` is about
+8 MB:
+
+```yaml
+ocr:
+  provider: command
+  command: ["tesseract", "-", "-"]
+```
+
+Nothing is linked against it, so an install using another provider
+carries no dependency on it.
+
+**`openai` and `tui`** send the selected image to a model, which reads
+screens considerably better than Tesseract — especially dense UI,
+proportional fonts and anything where a transposed character matters.
+They differ only in endpoint and auth header (`Authorization: Bearer`
+versus `X-API-Key`):
+
+```yaml
+ocr:
+  provider: openai
+  api_key: "secret://openai-key"
+  # endpoint: "https://api.openai.com/v1/chat/completions"   # the default
   # model: "auto"
   # reasoning_effort: "none"        # transcription needs no reasoning
   # max_tokens: 8000                # below this the model can return
                                     # 200 with empty content
-  # timeout_ms: 60000
   # prompt: "..."                   # default asks for verbatim text
 ```
 
-`api_key` is a `secret://` reference resolved exactly like a PiKVM
-password (see [Configure secrets](#configure-secrets)). Everything else
-is optional and defaults to the values shown. The endpoint is
-OpenAI-compatible, so another provider that speaks the same
-`/v1/chat/completions` shape can be pointed at here.
+Because the wire shape is the common one, `provider: openai` with an
+`endpoint` pointed at a local Ollama, vLLM or LM Studio works without
+any new code — and keeps the image on your own machine.
 
-Without `ocr.api_key` the region hotkey still lets you drag out a
-selection, but nothing is extracted — the viewer logs `region capture
-will select but not extract` at startup. The paste hotkey is
-unaffected either way.
+`api_key` is a `secret://` reference resolved exactly like a PiKVM
+password (see [Configure secrets](#configure-secrets)).
+
+Set `provider: none` to turn extraction off; the hotkey will still let
+you drag a selection and will say that nothing is configured. The paste
+hotkey is unaffected by any of this.
 
 ## MCP server
 

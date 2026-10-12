@@ -121,7 +121,7 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
         const QImage still = m_selectorImage;
         endRegionSelect();
         if (still.isNull() || imageRect.isEmpty()) return;
-        emit regionCaptured(still.copy(imageRect));
+        emit regionCaptured(still.copy(imageRect), imageRect);
     });
     setWindowTitle(QStringLiteral("Glasshouse Viewer"));
     resize(1280, 720);

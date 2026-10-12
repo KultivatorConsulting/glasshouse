@@ -4,7 +4,10 @@ qt_add_library(glasshouse_core STATIC
     config.h            config.cpp
     pikvmevents.h       pikvmevents.cpp
     pikvmclient.h       pikvmclient.cpp
-    tuiclient.h         tuiclient.cpp
+    textextractor.h
+    openaiextractor.h   openaiextractor.cpp
+    pikvmextractor.h    pikvmextractor.cpp
+    commandextractor.h  commandextractor.cpp
 )
 
 target_link_libraries(glasshouse_core

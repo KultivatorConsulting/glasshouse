@@ -13,7 +13,10 @@
 #include "pikvmclient.h"
 #include "secrets.h"
 #include "specialkeysdialog.h"
-#include "tuiclient.h"
+#include "commandextractor.h"
+#include "openaiextractor.h"
+#include "pikvmextractor.h"
+#include "textextractor.h"
 #include "videopipeline.h"
 #include "videowindow.h"
 
@@ -402,30 +405,68 @@ int main(int argc, char** argv) {
     }
     auto* router = new InputRouter(master->pk, &app);
 
-    // Region capture → Tui → clipboard. One client for every window. The
-    // API key is a `secret://` reference resolved here, so it never has to
-    // sit in config.yaml.
-    TuiClient::Options tuiOpts;
-    tuiOpts.endpoint        = cfg.ocr.endpoint;
-    tuiOpts.model           = cfg.ocr.model;
-    tuiOpts.reasoningEffort = cfg.ocr.reasoning_effort;
-    tuiOpts.maxTokens       = cfg.ocr.max_tokens;
-    tuiOpts.timeoutMs       = cfg.ocr.timeout_ms;
-    if (cfg.ocr.api_key.isEmpty()) {
-        qCInfo(lcOcr) << "ocr.api_key unset; region capture will select but"
-                      << "not extract";
-    } else if (const auto key = SecretResolver::resolve(cfg.ocr.api_key)) {
-        tuiOpts.apiKey = *key;
-    } else {
-        qCWarning(lcOcr) << "ocr.api_key could not be resolved:"
-                         << cfg.ocr.api_key;
+    // Region capture → text → clipboard. One extractor for every window,
+    // chosen by `ocr.provider`. The API key, where one is needed, is a
+    // `secret://` reference resolved here so it never sits in config.yaml.
+    TextExtractor* extractor = nullptr;
+    {
+        const auto buildOpenAi = [&](OpenAiExtractor::Auth auth,
+                                     const QString& label) {
+            OpenAiExtractor::Options o;
+            o.endpoint        = cfg.ocr.endpoint;
+            o.auth            = auth;
+            o.label           = label;
+            o.model           = cfg.ocr.model;
+            o.reasoningEffort = cfg.ocr.reasoning_effort;
+            o.maxTokens       = cfg.ocr.max_tokens;
+            o.timeoutMs       = cfg.ocr.timeout_ms;
+            if (const auto key = SecretResolver::resolve(cfg.ocr.api_key)) {
+                o.apiKey = *key;
+            } else {
+                qCWarning(lcOcr) << "ocr.api_key could not be resolved:"
+                                 << cfg.ocr.api_key;
+            }
+            return new OpenAiExtractor(o, &app);
+        };
+
+        switch (cfg.ocr.provider) {
+            case OcrProvider::Pikvm: {
+                // Needs every client, not just the HID master: the
+                // selection can come from any window, and each head is
+                // served by the PiKVM that captures it.
+                QHash<QString, PiKvmClient*> clients;
+                for (const auto& i : instances) clients.insert(i.host, i.pk);
+                extractor = new PikvmExtractor(clients, cfg.ocr.langs,
+                                               cfg.ocr.timeout_ms, &app);
+                break;
+            }
+            case OcrProvider::Command:
+                extractor = new CommandExtractor(cfg.ocr.command,
+                                                 cfg.ocr.timeout_ms, &app);
+                break;
+            case OcrProvider::OpenAi:
+                extractor = buildOpenAi(OpenAiExtractor::Auth::Bearer,
+                                        QStringLiteral("OpenAI"));
+                break;
+            case OcrProvider::Tui:
+                extractor = buildOpenAi(OpenAiExtractor::Auth::ApiKey,
+                                        QStringLiteral("Tui"));
+                break;
+            case OcrProvider::None:
+                qCInfo(lcOcr) << "ocr.provider is none; region capture will"
+                              << "select but not extract";
+                break;
+        }
     }
-    auto* tui = new TuiClient(tuiOpts, &app);
 
     // Both of these report back on the window that asked, which is the
     // one the pointer was over — not necessarily the one with focus.
     auto regionRequester = std::make_shared<QPointer<VideoWindow>>();
-    QObject::connect(tui, &TuiClient::finished, &app,
+    if (extractor) {
+        qCInfo(lcOcr) << "region extraction via" << extractor->describe();
+    }
+
+    if (extractor) QObject::connect(extractor, &TextExtractor::finished, &app,
         [regionRequester](bool ok, const QString& text, const QString& error) {
             VideoWindow* w = *regionRequester;
             if (w) w->clearBusy();
@@ -656,34 +697,53 @@ int main(int argc, char** argv) {
         // — just under Tui's ~2.1 MP downscale threshold, so a full-frame
         // selection survives at native resolution.
         QObject::connect(inst.window, &VideoWindow::regionCaptured, inst.window,
-                         [&inst, tui, &cfg, regionRequester](const QImage& image) {
-            if (!tui->configured()) {
+                         [&inst, extractor, &cfg, regionRequester](
+                             const QImage& image, const QRect& frameRect) {
+            if (!extractor) {
                 inst.window->flashStatus(QStringLiteral(
-                    "region capture: set ocr.api_key to extract text"), 8000);
+                    "region capture: no ocr.provider configured"), 8000);
                 return;
             }
-            QByteArray png;
-            QBuffer buf(&png);
-            buf.open(QIODevice::WriteOnly);
-            if (!image.save(&buf, "PNG")) {
-                qCWarning(lcOcr) << "region capture: PNG encode failed for"
-                                 << image.size();
+            if (QString why; !extractor->configured(&why)) {
                 inst.window->flashStatus(
-                    QStringLiteral("region capture: could not encode image"));
+                    QStringLiteral("region capture: %1").arg(why), 8000);
                 return;
             }
-            buf.close();
+
+            ExtractRequest req;
+            req.frameRect = frameRect;
+            req.host      = inst.host;
+            req.prompt    = cfg.ocr.prompt;
+
+            // The PiKVM provider reads its own live frame, so it needs
+            // the rectangle and not the pixels. Skipping the encode for
+            // it is not just tidiness: a full-screen selection is a
+            // couple of megabytes of PNG nobody would ever send.
+            if (cfg.ocr.provider != OcrProvider::Pikvm) {
+                QBuffer buf(&req.png);
+                buf.open(QIODevice::WriteOnly);
+                if (!image.save(&buf, "PNG")) {
+                    qCWarning(lcOcr) << "region capture: PNG encode failed for"
+                                     << image.size();
+                    inst.window->flashStatus(QStringLiteral(
+                        "region capture: could not encode image"));
+                    return;
+                }
+                buf.close();
+            }
 
             *regionRequester = inst.window;
             inst.window->setBusy(QStringLiteral("extracting %1×%2")
                                      .arg(image.width()).arg(image.height()));
-            tui->extractText(png, cfg.ocr.prompt);
+            extractor->extract(req);
         });
 
         // A second region hotkey press while the spinner is up abandons
         // the request rather than queueing another.
-        QObject::connect(inst.window, &VideoWindow::busyCancelRequested,
-                         tui, &TuiClient::cancel);
+        if (extractor) {
+            QObject::connect(inst.window, &VideoWindow::busyCancelRequested,
+                             extractor, &TextExtractor::cancel);
+        }
 
         // Paste hotkey: type the host clipboard onto the target via the
         // HID master's server-side keymap. Text only. Pressing the hotkey
