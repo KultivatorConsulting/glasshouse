@@ -218,12 +218,17 @@ retype by eye off a video stream.
 This one needs a provider. There are four, and they differ in what they
 cost you, not just in how they work:
 
-| `ocr.provider` | Needs | Image leaves the LAN? | Quality |
-|---|---|---|---|
-| `pikvm` | nothing — stock firmware has it | no | Tesseract |
-| `command` | a host tool, e.g. `tesseract-ocr` | no | whatever you point it at |
-| `openai` | an API key | yes | reads screens well |
-| `tui` | a Kultivator API key | yes | reads screens well |
+| `ocr.provider` | Needs | Image leaves the LAN? | Speed | Quality |
+|---|---|---|---|---|
+| `pikvm` | nothing — stock firmware has it | no | slowest; scales with area | Tesseract |
+| `command` | a host tool, e.g. `tesseract-ocr` | no | your host's | whatever you point it at |
+| `openai` | an API key | yes | one round trip | reads screens well |
+| `tui` | a Kultivator account | yes | one round trip | reads screens well |
+
+The trade is not subtle. `pikvm` costs nothing and sends nothing, and is
+also several times slower and visibly less accurate than the two
+model-backed providers — [Choosing a provider](#choosing-a-provider) has
+the measured numbers.
 
 **`pikvm` is the default and needs no configuration at all.** The PiKVM
 runs its own Tesseract and will OCR a rectangle of the frame it is
@@ -242,9 +247,9 @@ ocr:
 
 > **Keep `pikvm` selections small.** OCR runs on the Pi, and the time
 > scales with area: on a PiKVM 3 a 300×100 region took about 2 s, an
-> 890×320 region about 11 s, and a full 1920×1080 frame exceeded the
-> 60 s timeout nginx enforces in front of kvmd and came back 504. The
-> other providers do not have this problem.
+> 890×320 region about 11 s, a 1400×600 region about 31 s, and a full
+> 1920×1080 frame exceeded the 60 s timeout nginx enforces in front of
+> kvmd and came back 504. The other providers do not have this problem.
 
 **`command`** runs any host program with the PNG on stdin and reads the
 text off stdout. On noble, `sudo apt install tesseract-ocr` is about
@@ -260,8 +265,9 @@ Nothing is linked against it, so an install using another provider
 carries no dependency on it.
 
 **`openai` and `tui`** send the selected image to a model, which reads
-screens considerably better than Tesseract — especially dense UI,
-proportional fonts and anything where a transposed character matters.
+screens considerably better *and* several times faster than Tesseract —
+especially dense UI, proportional fonts and anything where a transposed
+character matters.
 They differ only in endpoint and auth header (`Authorization: Bearer`
 versus `X-API-Key`):
 
@@ -283,6 +289,58 @@ any new code — and keeps the image on your own machine.
 
 `api_key` is a `secret://` reference resolved exactly like a PiKVM
 password (see [Configure secrets](#configure-secrets)).
+
+`tui` points at Kultivator's own endpoint and needs an account there, so
+it is not something an arbitrary clone of this repo can just switch on.
+Without one, `openai` — against OpenAI, or against a model you run
+yourself via `endpoint` — gets you the same class of result, and `pikvm`
+gets you something that works today with nothing to sign up for.
+
+#### Choosing a provider
+
+Start on `pikvm`: it works immediately and nothing leaves your network.
+Move to a model-backed provider when the text matters more than keeping
+the image local. Measured on one snapshot, cropped identically for both
+sides, so this is the same pixels at the same moment:
+
+| selection | `pikvm` | `tui` |
+|---|---|---|
+| 300×100 | 2.2 s | 0.5 s |
+| 890×320 | 11.2 s | 3.4 s |
+| 1400×600 | 31.0 s | 7.8 s |
+| 1920×1080 (whole frame) | 504 at 60 s | 500 — too large to send |
+
+Both track pixel area at about the same rate, so the gap is a roughly
+constant 3–4× rather than something that closes at one end; run-to-run
+variance is about a second on the larger regions.
+
+**Both have a ceiling, and they are worth knowing about, because a big
+enough selection fails rather than merely taking a while.** The PiKVM's
+OCR runs on the Pi behind an nginx timeout it cannot ask for more time
+from, so past roughly a quarter of a 1080p screen it stops being slow
+and starts returning 504. Tui's limit is request size rather than time:
+its front end accepts 1 MiB of request body, the PNG is base64'd into
+the JSON at 4/3 its size, and a 1920×1080 screenshot PNG runs about
+1.3 MB — so a whole-frame selection is refused instantly with a 500. The
+largest selections measured getting through were around 1600×700 of
+terminal content; a busier screen compresses worse, so treat it as a
+budget in bytes, not a fixed rectangle. `openai` against OpenAI itself
+has no comparable wall — it documents 20 MB per image.
+
+Accuracy diverges on exactly the characters you would be extracting text
+in order to avoid retyping. From the same 890×320 crop of a terminal:
+
+| | `pikvm` | `tui` |
+|---|---|---|
+| an email address | `first last@example.com` | `first_last@example.com` |
+| a shell prompt | `USERGHOST-NZ-LL` | `USER@HOST-NZ-LL` |
+| a command | `git 1` | `git l` |
+| a commit SHA | two characters wrong | correct |
+| a timezone | `+1360` | `+1300` |
+
+Tesseract loses `_` to a space, `@` to `G` and `l` to `1`, and added a
+few standalone `1` lines that were not on screen. Fine for a sentence of
+prose; not fine for a hash, a path or an address.
 
 Set `provider: none` to turn extraction off; the hotkey will still let
 you drag a selection and will say that nothing is configured. The paste

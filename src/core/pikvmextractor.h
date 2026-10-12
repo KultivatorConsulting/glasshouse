@@ -21,10 +21,13 @@ class PiKvmClient;
 // default for a public clone and the right answer for anyone who cannot
 // send screenshots of a target machine to a third party.
 //
-// It is Tesseract, so expect Tesseract's quality: good on prose, prone
-// to confusing punctuation and single characters in hashes and serial
-// numbers. When that matters, a model-backed provider reads screens
-// better.
+// It is Tesseract on a Pi, so expect Tesseract's quality at a Pi's
+// speed: good on prose, prone to confusing punctuation and single
+// characters in hashes and serial numbers, and measured 3-4x slower
+// than a model round trip at every selection size (DESIGN.md §10.10).
+// When either matters, a model-backed provider is the better pick —
+// this one's case is that it needs no install, no account and no
+// egress, not that it reads screens well.
 //
 // Unlike the others, this one does not send the captured PNG at all.
 // The PiKVM OCRs the frame it is serving, so the request is a rectangle

@@ -370,9 +370,25 @@ no install anywhere and no egress — which is also the mitigation §11
 wanted for the privacy row, not just "the user chose the rectangle".
 
 The cost is latency, because it is Tesseract on a Pi: measured 2 s for
-300×100, 11 s for 890×320, and a 504 at 60 s for a whole 1920×1080
-frame. Region-scoped use is fine; whole-screen is not, which the
-rectangle-based feature happens to guarantee.
+300×100, 11 s for 890×320, 31 s for 1400×600, and a 504 at 60 s for a
+whole 1920×1080 frame. Region-scoped use is fine; whole-screen is not,
+which the rectangle-based feature happens to guarantee.
+
+**Measured against Tui, the default is the convenient provider and not
+the good one.** Same snapshot, cropped identically and sent to both:
+Tui answered 3–4× faster at every size (0.5 s / 3.4 s / 7.8 s against
+2.2 s / 11.2 s / 31.0 s) and read correctly the characters Tesseract
+dropped — `_`, `@`, `l`-versus-`1`, a git SHA. DESIGN.md §10.10 has the
+tables, and also the limit the measurement turned up: Tui's front end
+takes 1 MiB of request body, so a whole-frame selection is refused
+outright. That is a deployment setting rather than anything the viewer
+can fix well, since downscaling a screenshot captured to be read
+character by character defeats the point.
+
+So `pikvm` is the right default on availability grounds and `tui` or
+`openai` is the right choice on merit. Keeping both, rather than folding
+Tui into `openai`, stays justified: the auth header genuinely differs,
+and the harness will want the one it is entitled to use.
 
 **"Built-in OCR" and "the host's OCR" still collapse into `command`**,
 because the generic form of host OCR on Linux *is* a subprocess — there

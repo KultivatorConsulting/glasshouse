@@ -43,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consequence: that provider reads the screen as it is when the request
   lands, while the others read the still the user froze.
 
+### Documentation
+- **The providers are now measured against each other, not just
+  described.** On identical crops of one snapshot, Tui answered 3–4×
+  faster than the PiKVM's own OCR at every selection size and read
+  correctly the characters Tesseract lost (`_`, `@`, `l` versus `1`, a
+  git SHA). The README's provider section and DESIGN.md §10.10 carry
+  the figures, so choosing between "nothing leaves the LAN" and "gets
+  the characters right" is an informed choice rather than a guess.
+- **Each provider's upper limit is now written down**, because past a
+  certain selection size they fail rather than slow down: `pikvm`
+  returns 504 once kvmd's nginx times out at 60 s, and `tui` returns
+  500 immediately once the base64'd PNG pushes the request past its
+  1 MiB body limit — about 786 KB of PNG, so a whole 1080p frame never
+  fits. `openai` against OpenAI itself documents 20 MB per image and
+  has no equivalent wall.
+
 ## [0.1.4] - 2026-10-12
 
 ### Added

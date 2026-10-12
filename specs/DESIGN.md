@@ -1117,9 +1117,78 @@ numbers — in the verification run it read a git SHA with two characters
 wrong and `+1300` as `+1360`. That is the trade for an image that never
 leaves the LAN, and the reason the model-backed providers stay.
 
+**Head to head, Tui beats the PiKVM on both axes (verified 2026-10-12).**
+One snapshot from a PiKVM 3, cropped identically and sent to both
+providers, so the comparison is the same pixels at the same moment:
+
+| selection | `pikvm` | `tui` | ratio |
+|---|---|---|---|
+| 300×100 | 2.2 s | 0.5 s | 4.4× |
+| 890×320 | 11.2 s | 3.4 s | 3.3× |
+| 1400×600 | 31.0 s | 7.8 s | 4.0× |
+| 1920×1080 | **504 at 60 s** | **500, instantly** | — |
+
+Repeat runs of the 890×320 case landed within 0.2 s of each other and of
+the figures in the table above, so the ratio is the signal and not noise.
+Both curves track pixel area at about the same exponent — 28× the area
+cost the Pi 14× the time and Tui 16× — so the 3–4× gap is near constant
+and does not close at either end. The 1400×600 row is the useful one: by
+the time a selection is big enough to be worth OCRing rather than
+reading, `pikvm` is at half a minute.
+
+**Both providers have a hard ceiling near the top of the range, and
+neither is a timeout worth waiting out.** The PiKVM's is time: nginx in
+front of kvmd gives up at 60 s and the client cannot ask for longer.
+Tui's is request body size, which the previous draft of this section got
+wrong — see below.
+
+Accuracy diverged on the characters the feature exists to get right.
+Same crop, a terminal:
+
+| | `pikvm` | `tui` |
+|---|---|---|
+| an email address | `first last@example.com` | `first_last@example.com` |
+| a shell prompt | `USERGHOST-NZ-LL` | `USER@HOST-NZ-LL` |
+| a command | `git 1` | `git l` |
+| a commit SHA | two characters wrong | correct |
+| a timezone | `+1360` | `+1300` |
+
+`_` to a space, `@` to `G`, `l` to `1`, plus a few standalone `1` lines
+that were not on screen. So the case for `pikvm` as the default is
+entirely "nothing installed, nothing leaves the LAN, no account" — it is
+not the better extractor, and the documentation should not imply it is.
+
 **Tui and OpenAI specifics.** PNG rather than JPEG, so text edges stay crisp.
 A 1920×1080 frame is 2.07 MP, just under the ~2.1 MP above which Tui downscales
-server-side, so even a full-frame selection survives at native resolution.
+server-side — but that is the wrong limit to have been reasoning about.
+
+**Tui's front end takes 1 MiB of request body, and a full-frame PNG does
+not fit (verified 2026-10-12).** The image is base64'd into the JSON, so
+the request is 4/3 the PNG; a 1920×1080 screenshot PNG of a terminal is
+~1.28 MB and makes a 1.71 MB request. Bracketed by bisection on one
+snapshot:
+
+| selection | PNG | request body | result |
+|---|---|---|---|
+| 1500×700 | 759 KB | 0.966 MiB | 200 in 10.9 s |
+| 1600×700 | 777 KB | 0.988 MiB | 200 in 10.1 s |
+| 1560×760 | 862 KB | 1.096 MiB | **500 in 0.0 s** |
+| 1920×1080 | 1279 KB | 1.629 MiB | **500 in 0.0 s**, reproducibly |
+
+The 500 is instant, comes from `nginx/1.25.5` rather than the API, and
+survives a retry, so it is `client_max_body_size` (1 MiB is nginx's
+default) answering with a 500 rather than the usual 413. The practical
+budget is therefore **~786 KB of PNG**, which is a budget in bytes and
+not a rectangle: a dense screen compresses worse and fails smaller.
+`openai` against OpenAI proper has no equivalent wall — 20 MB per image
+documented — so this is a Tui deployment limit, not a property of the
+provider class.
+
+Two consequences, neither yet addressed in code: a large selection on
+`tui` surfaces a bare transport error rather than something actionable,
+and the fix with the best quality is server-side (raise the limit on
+Kultivator's nginx) rather than downscaling a screenshot that was
+captured precisely to be read character by character.
 The two differ only in endpoint and auth header — `X-API-Key` for Tui,
 `Authorization: Bearer` for OpenAI and the clones — which is why one class
 serves both, and why pointing `endpoint` at a local Ollama or vLLM works

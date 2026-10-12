@@ -68,9 +68,11 @@ region_hotkey:       "Ctrl+Alt+Shift+C"
 #            tesseract-ocr (~8 MB on noble) and point `command` at it.
 #   openai   Any OpenAI-compatible /v1/chat/completions, authenticated
 #            with `Authorization: Bearer`. Reads screens far better than
-#            Tesseract. Also how you reach a local Ollama / vLLM /
+#            Tesseract, and measured 3-4x faster than `pikvm` at every
+#            selection size. Also how you reach a local Ollama / vLLM /
 #            LM Studio — set `endpoint` and the key it expects.
 #   tui      Kultivator's endpoint, authenticated with `X-API-Key`.
+#            Needs an account there; `openai` is the open equivalent.
 #   none     Off. The region hotkey still selects, and reports that
 #            nothing is configured.
 #
