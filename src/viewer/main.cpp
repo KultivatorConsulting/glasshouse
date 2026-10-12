@@ -17,10 +17,12 @@
 #include "openaiextractor.h"
 #include "pikvmextractor.h"
 #include "textextractor.h"
+#include "watcher.h"
 #include "videopipeline.h"
 #include "videowindow.h"
 
 #include <QApplication>
+#include <QInputDialog>
 #include <QBuffer>
 #include <QClipboard>
 #include <QCommandLineParser>
@@ -291,9 +293,15 @@ int main(int argc, char** argv) {
     if (regionHotkey.isEmpty()) {
         regionHotkey = QStringLiteral("Ctrl+Alt+Shift+C");
     }
+    // HARNESS.md §5.5 names Ctrl+Shift+Alt+W as the free chord for this.
+    QString watchHotkey = cfg.watch_hotkey;
+    if (watchHotkey.isEmpty()) {
+        watchHotkey = QStringLiteral("Ctrl+Alt+Shift+W");
+    }
+    if (!cfg.watchers.enabled) watchHotkey.clear();
     const CaptureHotkeys hotkeys{releaseHotkey, fullscreenHotkey,
                                  specialKeysHotkey, pasteHotkey,
-                                 regionHotkey};
+                                 regionHotkey, watchHotkey};
     const QString onlyHost = parser.value(onlyOpt);
 
     // ------------------------------------------------------------------
@@ -457,6 +465,34 @@ int main(int argc, char** argv) {
                               << "select but not extract";
                 break;
         }
+    }
+
+    // Watchers (HARNESS.md §5). The registry is inert until something
+    // registers a rectangle, and nothing can without a deliberate act —
+    // the watch hotkey, or an MCP tool on a server that is itself off by
+    // default — so it costs nothing to have running.
+    WatcherRegistry* watchers = nullptr;
+    if (cfg.watchers.enabled) {
+        watchers = new WatcherRegistry(&app);
+        WatcherLimits lim;
+        lim.maxWatchers       = cfg.watchers.max;
+        lim.defaultThreshold  = cfg.watchers.threshold;
+        lim.defaultCooldownMs = cfg.watchers.cooldown_ms;
+        lim.defaultSettleMs   = cfg.watchers.settle_ms;
+        lim.volatileBytesPerWatcher = cfg.watchers.history_bytes_per_watcher;
+        lim.volatilePoolBytes       = cfg.watchers.history_pool_bytes;
+        lim.minVolatileDepth        = cfg.watchers.min_history_frames;
+        watchers->setLimits(lim);
+        qCInfo(lcWatch).nospace()
+            << "watchers enabled: up to " << lim.maxWatchers
+            << ", threshold " << lim.defaultThreshold
+            << ", cooldown " << lim.defaultCooldownMs << "ms, history "
+            << (lim.volatileBytesPerWatcher / (1024 * 1024)) << "MB each / "
+            << (lim.volatilePoolBytes / (1024 * 1024)) << "MB total, "
+            << "regions up to " << lim.volatileAreaCeiling()
+            << " px may keep history";
+    } else {
+        qCInfo(lcWatch) << "watchers disabled by config";
     }
 
     // Both of these report back on the window that asked, which is the
@@ -693,9 +729,10 @@ int main(int argc, char** argv) {
 
         // Region capture: the window hands back a crop of its frozen
         // frame; we encode and send it. PNG rather than JPEG so text
-        // edges stay crisp for the model, and a 1920x1080 frame is 2.07 MP
-        // — just under Tui's ~2.1 MP downscale threshold, so a full-frame
-        // selection survives at native resolution.
+        // edges stay crisp for the model. Note that a full-frame selection
+        // does NOT fit Tui: its front end caps the request body at 1 MiB
+        // and base64 inflates the PNG by 4/3, so the budget is ~786 KB of
+        // PNG against a 1080p screenshot's ~1.28 MB (DESIGN.md §10.10).
         QObject::connect(inst.window, &VideoWindow::regionCaptured, inst.window,
                          [&inst, extractor, &cfg, regionRequester](
                              const QImage& image, const QRect& frameRect) {
@@ -737,6 +774,92 @@ int main(int argc, char** argv) {
                                      .arg(image.width()).arg(image.height()));
             extractor->extract(req);
         });
+
+        // Watchers: every decoded frame for this screen goes through the
+        // detector. HARNESS.md §5.3 — a toast lives a few seconds, so a
+        // timer would miss most of them; the comparison is a strided luma
+        // diff over the watched rectangle only, which is why per-frame is
+        // affordable. ingestFrame returns immediately when no watcher is
+        // registered for this screen.
+        if (watchers) {
+            const int screenIndex = i;
+            if (QVideoSink* sink = inst.window->videoSink()) {
+                QObject::connect(sink, &QVideoSink::videoFrameChanged,
+                                 watchers,
+                                 [watchers, screenIndex](const QVideoFrame& f) {
+                    watchers->ingestFrame(screenIndex, f);
+                });
+            }
+
+            // The dragged-rectangle path (HARNESS.md §5.5). The rectangle
+            // says where to look and nothing about what matters there, so
+            // the sentence is asked for rather than inferred.
+            QObject::connect(inst.window, &VideoWindow::watchRegionSelected,
+                             inst.window,
+                             [watchers, &inst, screenIndex](const QRect& r) {
+                // The grabs come back when the selector closes, which would
+                // starve a modal dialog of input. Creating a watcher is a
+                // configuration act, not an input one, so dropping capture
+                // for the question is the predictable trade.
+                inst.window->stopCapture();
+
+                bool ok = false;
+                const QString intent = QInputDialog::getText(
+                    inst.window, QStringLiteral("Watch this region"),
+                    QStringLiteral("What should I look for here?\n"
+                                   "%1×%2 at (%3, %4) on %5")
+                        .arg(r.width()).arg(r.height())
+                        .arg(r.x()).arg(r.y()).arg(inst.host),
+                    QLineEdit::Normal, QString(), &ok);
+                if (!ok || intent.trimmed().isEmpty()) {
+                    inst.window->flashStatus(
+                        QStringLiteral("watcher cancelled — it needs a "
+                                       "sentence saying what matters"), 4000);
+                    return;
+                }
+
+                WatcherDef d;
+                d.screen = screenIndex;
+                d.rect   = r;
+                d.intent = intent.trimmed();
+                d.origin = WatcherOrigin::Manual;
+                // A hand-drawn region is small by construction, so history
+                // is worth asking for; it is refused if the drag was large.
+                d.volatileWanted = true;
+
+                QString err;
+                const int id = watchers->create(d, &err);
+                if (id == 0) {
+                    inst.window->flashStatus(
+                        QStringLiteral("watcher: %1").arg(err), 8000);
+                    return;
+                }
+                WatcherDef stored;
+                watchers->get(id, &stored);
+                inst.window->flashStatus(
+                    QStringLiteral("watcher %1 on %2×%3%4")
+                        .arg(id).arg(r.width()).arg(r.height())
+                        .arg(stored.volatileGranted
+                                 ? QStringLiteral(" (keeping history)")
+                                 : QStringLiteral(" (too large for history)")),
+                    6000);
+            });
+
+            // Where the target's captured cursor is, so a pointer crossing
+            // a watched region does not read as the event. Driven off mouse
+            // moves, which are already coalesced to ~120 Hz, and asked of
+            // every window because the move signal belongs to the grab
+            // holder rather than to the screen the cursor is over.
+            QObject::connect(inst.window, &VideoWindow::mouseMoved, watchers,
+                             [watchers, &instances](int, int) {
+                const QPoint g = QCursor::pos();
+                for (int n = 0; n < instances.size(); ++n) {
+                    if (!instances[n].window) continue;
+                    const QPoint fp = instances[n].window->framePointFor(g);
+                    if (fp.x() >= 0) watchers->setPointer(n, fp);
+                }
+            });
+        }
 
         // A second region hotkey press while the spinner is up abandons
         // the request rather than queueing another.
@@ -990,6 +1113,21 @@ int main(int argc, char** argv) {
     // have to re-authenticate every PiKVM and would still not know the
     // monitors are adjacent. See HARNESS.md §9.
     // ------------------------------------------------------------------
+    // A firing is surfaced on the window that owns the screen, so the user
+    // can tell that something is watching and when it tripped. Delivery to
+    // a consumer is still a poll away (HARNESS.md §9.1) — this is only the
+    // local signal.
+    if (watchers) {
+        QObject::connect(watchers, &WatcherRegistry::fired, &app,
+                         [&instances](const glasshouse::WatcherEvent& ev) {
+            if (ev.screen < 0 || ev.screen >= instances.size()) return;
+            VideoWindow* w = instances[ev.screen].window;
+            if (!w) return;
+            w->flashStatus(QStringLiteral("watcher %1 fired: %2")
+                               .arg(ev.id).arg(ev.intent), 5000);
+        });
+    }
+
     McpServer* mcp = nullptr;
     if (cfg.mcp.enabled) {
         // A token that was configured but cannot be resolved must not
@@ -1015,6 +1153,7 @@ int main(int argc, char** argv) {
             view.logicalDesktop = cfg.logical_desktop;
             view.hid            = master->pk;
             view.hidHost        = master->host;
+            view.watchers       = watchers;
             // Config monitor id, reported alongside the 0-based screen
             // index so a caller can cross-reference config.yaml.
             const auto monitorIdForHost = [&cfg](const QString& host) {

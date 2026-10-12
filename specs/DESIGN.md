@@ -573,8 +573,13 @@ act path, and region capture is the observe path.
 **First increment is in** (§10.11): a local MCP server exposing the
 session, screenshots, typing, key chords and pointer control. That is the
 tier-2 consumer path from HARNESS.md §8.1 — point any MCP client at it and
-the surface is usable before the harness exists. Still unbuilt: the watcher
-engine (§5 and §5.4 of HARNESS.md) and everything behind it.
+the surface is usable before the harness exists.
+
+**Second increment is in** (§10.12): the watcher engine, with the
+`watchers/*` tool family of HARNESS.md §9.1 and the manual drag of §5.5.
+Still unbuilt: prompted locating (§5 step 1, which needs a vision provider
+and a locate request shape), OpenCV template-matching for drift recovery
+(§6), and the judge — which is the private package's whole job.
 
 **Only part of it belongs to this repository.** The watcher engine and
 the MCP server must live in the viewer — detection runs on every decoded
@@ -1311,6 +1316,84 @@ cannot be resolved stops the server rather than silently downgrading to an
 open port. Tool activity flashes on every window's status bar, because
 something else driving the keyboard should be visible rather than silent.
 
+### 10.12 Watchers (verified 2026-10-13)
+
+The engine of HARNESS.md §5, built in `src/watch/`. What the design said
+largely survived contact; three things only became decidable by running it.
+
+**The metric is a strided luma delta against the previous frame, not
+against a fixed baseline.** Frame-to-frame is what makes it edge-triggered
+for free — a badge appearing is a brief spike and a badge that then sits
+there goes quiet again — where a baseline comparison would stay above
+threshold for as long as the badge was visible and fire on every frame.
+It also means one buffer per watcher rather than two.
+
+Luma only, and read from the decoder's own plane: the frames arrive as
+planar YUV (NV12 from VA-API, I420 from the software paths), so the hot
+path maps the frame and reads plane 0 for the watched rectangle, never
+converting a full frame. A colour crop is produced only for a frame worth
+keeping or an event worth reporting, which is a handful per event rather
+than ~27 a second. Anything that is not a luma-plane format falls back to
+`toImage()`, which is correct everywhere and costs a conversion per frame.
+
+Sampling uses a stride that keeps any rectangle under 65,536 samples, so
+a careless full-screen watcher costs about what a tray-badge one does.
+
+**A cooldown has to re-arm, not only suppress.** The first draft re-armed
+the trigger only on a quiet frame, which is right for a transient and
+wrong for everything else: a region that never goes quiet — a clock, a
+progress bar, a video — fired exactly once and then stayed silent for the
+rest of the session. Two unit tests caught it. The fix is that the
+cooldown elapsing re-arms as well, so a sustained change reports at the
+cooldown's rate, which is the job the cooldown is named for.
+
+**A mean over the rectangle punishes a large one far more than the cost
+model suggests.** Measured against the probe's synthetic stream: a toast
+of 380x110 against a 1920x1080 frame is 2% of the area, so even a delta of
+220 over the toast moves the whole-frame mean by about 4.4 — under the
+default threshold of 12, and a whole-screen watcher never fires at all.
+So "watch the whole screen and let the model sort it out" is not a
+shortcut, and the documentation says so rather than leaving it to be
+discovered. The sensitivity floor is roughly `threshold x rect_area /
+changed_area`.
+
+**Budgets, from HARNESS.md §5.4.** 16 MB of history per watcher, 96 MB
+across all of them, a minimum useful depth of 30 frames — which is what
+sets the area ceiling for history at `16 MB / 30 / 3` = about 186,000 px,
+roughly 500x350. Above it history is refused and the watcher still works,
+because silently keeping two frames would be worse than saying so.
+Retention is driven by the same metric as the trigger, so a quiet region
+holds one frame however long it stays quiet. `min_history_frames` divides
+that budget, so the config loader rejects a zero rather than dividing by
+it.
+
+**Delivery is a poll and nothing else.** `glasshouse_watcher_poll` takes a
+cursor and returns the events after it plus the next cursor. Verified
+against the probe: a cursor replay returns nothing, a fresh consumer
+passing 0 still gets the whole buffer, and deleting a watcher drops its
+events with it. No subscriber registry, no outbound connection, no
+delivery retry — HARNESS.md §9.1's argument, and the reason any MCP client
+works rather than only ones implementing resource subscriptions.
+
+**The filmstrip earns its place.** Tiling retained crops into one image
+with each one's wall-clock time beneath it turns a four-image-per-request
+limit into dozens of moments: twelve 400x130 crops tile to 1630x462, one
+image slot. Verified end to end through the probe — the strip shows the
+toast present, absent, present, timestamped, which is exactly what makes
+"it was there at 09:38:29 and gone by 09:38:30" answerable.
+
+**What the probe is for.** `glasshouse-mcpprobe` now feeds screen 0 a
+synthetic 30 fps stream with a toast on a five-second cycle and carries a
+registry, so the whole tool family is exercisable with no PiKVM attached.
+It needs a `QGuiApplication` rather than a `QCoreApplication` because the
+filmstrip draws text; run it with `QT_QPA_PLATFORM=offscreen`.
+
+**Unlike the input tools, this is testable.** `hidReady()` gates every MCP
+input tool behind a connected PiKVM, so no unit test can reach them. The
+detector takes images in and produces events out, so edge triggering, the
+cooldown, pointer suppression, the area ceiling, ring eviction and the
+poll cursor are all covered by `tests/test_watcher.cpp`.
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
@@ -1324,7 +1407,9 @@ something else driving the keyboard should be visible rather than silent.
 | Clipboard text the target keymap can't type | **resolved (mitigated)** | §10.9 — common Unicode punctuation folded to ASCII, CRLF normalised, remainder dropped with a count shown; kvmd discards it silently otherwise |
 | Runaway clipboard paste into a live target | open (bounded) | §10.9 — chunks are sequenced so a second hotkey press aborts the remainder; what already reached the HID stays typed |
 | Tui API key leaking into config or logs | **resolved** | `ocr.api_key` is a `secret://` ref resolved via SecretResolver (env or `secrets.yaml`, 0600); the key is never logged |
-| Region capture sends target screen content to an external service | open (by design) | The user chooses the rectangle each time and nothing is sent without a deliberate drag; endpoint is configurable |
+| Region capture sends target screen content to an external service | open (by design, configurable away) | Conditional on `ocr.provider`: `pikvm` and `command` keep the image on the LAN entirely and `none` disables extraction, so "nothing leaves the machine" is a configuration rather than an argument. For `openai`/`tui` the user still chooses the rectangle each time and nothing is sent without a deliberate drag; the endpoint is configurable, including at a model you run yourself |
+| Watchers retain target screen content without a per-frame decision | open (bounded) | §10.12 — nobody chooses each frame, which is the mitigation region capture had. What bounds it instead: detection is entirely local and sends nothing; history is opt-in per watcher, capped at 16 MB each and 96 MB in total, held in memory, never written to disk, and dropped when the watcher is removed; the area ceiling refuses a window-sized buffer outright. Creating one via MCP flashes on the status bar, so a standing read of the screen cannot be set up silently |
+| A watcher's crops leave in bulk once a consumer asks | open (bounded) | §10.12 — `glasshouse_watcher_frames` makes the buffer fetchable, so the ceiling on what can leave in one turn is the buffer's depth rather than a single crop. Bounded by the same 16 MB and by the consumer being local and explicitly configured; the MCP server is off by default and loopback-only |
 | Local MCP server lets any local process drive the target | open (bounded) | §10.11 — off by default, loopback-only when on, optional bearer token that fails closed when unresolvable, and every tool call flashes on the status bar so it is not silent |
 | Growing from N=2 to N=3 later | **resolved** | Config-only change; architecture is list-parameterized |
 | `webrtcbin` long-running leak (~8 MB/s/stream) | open (worked around) | Use `transport: mjpeg` for affected PiKVMs — the leak is genuinely inside `webrtcbin`/`libnice` and survives pipeline teardown. Needs upstream bug. See §10.5 |

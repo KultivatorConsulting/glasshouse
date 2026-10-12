@@ -15,6 +15,7 @@ namespace glasshouse {
 class McpHttpServer;
 class PiKvmClient;
 class VideoWindow;
+class WatcherRegistry;
 
 // One head of the session, as the MCP client sees it.
 //
@@ -43,6 +44,11 @@ struct McpSessionView {
     // case the input tools report that rather than silently picking one.
     PiKvmClient*     hid = nullptr;
     QString          hidHost;
+    // The watcher registry, shared with the viewer. Null when watchers are
+    // disabled, in which case the watcher tools say so rather than being
+    // hidden — a client that cannot see the tool cannot report why it is
+    // missing.
+    WatcherRegistry* watchers = nullptr;
 };
 
 // JSON-RPC + MCP protocol over McpHttpServer, with the Glasshouse tool set.
@@ -90,6 +96,19 @@ private:
     void toolMouseMove(const QJsonObject& args, Done done);
     void toolMouseClick(const QJsonObject& args, Done done);
     void toolMouseScroll(const QJsonObject& args, Done done);
+
+    // Watchers (HARNESS.md §9.1). The viewer never pushes: an event waits
+    // in the registry until a client collects it with the poll tool, which
+    // is why this works with any MCP client rather than only ones that
+    // implement resource subscriptions.
+    void toolWatcherCreate(const QJsonObject& args, Done done);
+    void toolWatcherList(const QJsonObject& args, Done done);
+    void toolWatcherPoll(const QJsonObject& args, Done done);
+    void toolWatcherFrames(const QJsonObject& args, Done done);
+    void toolWatcherDelete(const QJsonObject& args, Done done);
+
+    // Resolve the registry or explain why there isn't one.
+    WatcherRegistry* watchersOrError(QString* error) const;
 
     // Resolve `screen` (or the only screen, when there is one) or fail.
     const McpScreen* screenFor(const QJsonObject& args, QString* error) const;

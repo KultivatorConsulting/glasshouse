@@ -113,14 +113,23 @@ VideoWindow::VideoWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(m_stack);
 
     connect(m_selector, &RegionSelector::cancelled, this, [this]() {
+        const bool watching = m_selectPurpose == SelectPurpose::Watch;
         endRegionSelect();
-        flashStatus(QStringLiteral("region capture cancelled"), 2000);
+        flashStatus(watching ? QStringLiteral("watcher cancelled")
+                             : QStringLiteral("region capture cancelled"),
+                    2000);
     });
     connect(m_selector, &RegionSelector::selected, this,
             [this](const QRect& imageRect) {
-        const QImage still = m_selectorImage;
+        const QImage         still   = m_selectorImage;
+        const SelectPurpose  purpose = m_selectPurpose;
         endRegionSelect();
-        if (still.isNull() || imageRect.isEmpty()) return;
+        if (imageRect.isEmpty()) return;
+        if (purpose == SelectPurpose::Watch) {
+            emit watchRegionSelected(imageRect);
+            return;
+        }
+        if (still.isNull()) return;
         emit regionCaptured(still.copy(imageRect), imageRect);
     });
     setWindowTitle(QStringLiteral("Glasshouse Viewer"));
@@ -266,6 +275,7 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
     const QString& specialKeysHotkey = hotkeys.specialKeys;
     const QString& pasteHotkey       = hotkeys.paste;
     const QString& regionHotkey      = hotkeys.region;
+    const QString& watchHotkey       = hotkeys.watch;
     m_targetMonitor     = targetMonitor;
     m_logicalDesktop    = logicalDesktop;
     m_releaseHotkey     = encodeHotkey(releaseHotkey);
@@ -273,6 +283,7 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
     m_specialKeysHotkey = encodeHotkey(specialKeysHotkey);
     m_pasteHotkey       = encodeHotkey(pasteHotkey);
     m_regionHotkey      = encodeHotkey(regionHotkey);
+    m_watchHotkey       = encodeHotkey(watchHotkey);
     if (m_releaseHotkey == 0 && !releaseHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable release_hotkey:" << releaseHotkey;
     }
@@ -287,6 +298,9 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
     }
     if (m_regionHotkey == 0 && !regionHotkey.isEmpty()) {
         qCWarning(lcHid) << "unparseable region_hotkey:" << regionHotkey;
+    }
+    if (m_watchHotkey == 0 && !watchHotkey.isEmpty()) {
+        qCWarning(lcHid) << "unparseable watch_hotkey:" << watchHotkey;
     }
 
     // Pre-capture path: while no widget has Qt's keyboard grab, the
@@ -315,6 +329,12 @@ void VideoWindow::setCaptureContext(const QRect& targetMonitor,
         sc->setContext(Qt::WindowShortcut);
         connect(sc, &QShortcut::activated,
                 this, &VideoWindow::requestRegionCapture);
+    }
+    if (m_watchHotkey != 0) {
+        auto* sc = new QShortcut(QKeySequence(watchHotkey), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated,
+                this, &VideoWindow::requestWatchRegion);
     }
 }
 
@@ -378,6 +398,23 @@ void VideoWindow::updateCaptureFocus(VideoWindow* w) {
     if (m_focusWindow == w) return;
     m_focusWindow = w;
     for (auto* win : sessionWindows()) win->setCaptureFocus(win == w);
+}
+
+QPoint VideoWindow::framePointFor(const QPoint& globalPos) const {
+    QVideoSink* sink      = m_video->videoSink();
+    const QSize videoSize = sink ? sink->videoSize() : QSize();
+    if (videoSize.isEmpty()) return {-1, -1};
+
+    const QRect  inWidget = computeLetterbox(m_video->size(), videoSize);
+    const QPoint local    = m_video->mapFromGlobal(globalPos) -
+                            inWidget.topLeft();
+    if (local.x() < 0 || local.y() < 0 ||
+        local.x() >= inWidget.width() || local.y() >= inWidget.height()) {
+        return {-1, -1};
+    }
+    return QPoint(
+        int(double(local.x()) / inWidget.width()  * videoSize.width()),
+        int(double(local.y()) / inWidget.height() * videoSize.height()));
 }
 
 ApiCoord VideoWindow::transformFor(const QPoint& globalPos) const {
@@ -567,15 +604,24 @@ void VideoWindow::requestRegionCapture() {
             return;
         }
     }
+    requestSelection(SelectPurpose::Extract);
+}
 
+void VideoWindow::requestWatchRegion() {
+    // No busy check: registering a watcher is local and instant, so there
+    // is no in-flight request a second press could mean to cancel.
+    requestSelection(SelectPurpose::Watch);
+}
+
+void VideoWindow::requestSelection(SelectPurpose purpose) {
     // While captured the hotkey lands on the grab holder regardless of where
     // the pointer is, but the user means the window they are looking at.
     VideoWindow* target = windowForCursor(QCursor::pos());
     if (!target) target = const_cast<VideoWindow*>(this);
-    target->beginRegionSelect();
+    target->beginRegionSelect(purpose);
 }
 
-bool VideoWindow::beginRegionSelect() {
+bool VideoWindow::beginRegionSelect(SelectPurpose purpose) {
     if (m_selecting) return false;
 
     QVideoSink* sink = m_video->videoSink();
@@ -592,12 +638,18 @@ bool VideoWindow::beginRegionSelect() {
     if (VideoWindow* holder = captureHolder()) holder->suspendCaptureGrabs();
 
     m_selectorImage = still;
+    m_selectPurpose = purpose;
     m_selector->setImage(still);
     m_stack->setCurrentWidget(m_selector);
     m_selector->setFocus(Qt::OtherFocusReason);
     m_selecting = true;
 
-    qCInfo(lcOcr) << "region capture: selecting from" << still.size();
+    if (purpose == SelectPurpose::Watch) {
+        flashStatus(QStringLiteral("drag the region to watch"), 3000);
+        qCInfo(lcWatch) << "watcher: selecting a region from" << still.size();
+    } else {
+        qCInfo(lcOcr) << "region capture: selecting from" << still.size();
+    }
     return true;
 }
 
@@ -842,6 +894,10 @@ bool VideoWindow::handleKey(QKeyEvent* ev, bool pressed) {
         }
         if (m_regionHotkey != 0 && combo == m_regionHotkey) {
             requestRegionCapture();
+            return true;
+        }
+        if (m_watchHotkey != 0 && combo == m_watchHotkey) {
+            requestWatchRegion();
             return true;
         }
     }

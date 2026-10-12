@@ -135,6 +135,43 @@ QStringList validateConfig(const Config& cfg) {
             break;
     }
 
+    // 4b. watcher budgets. min_history_frames divides the per-watcher byte
+    // budget to derive the area ceiling, so a zero here is a crash rather
+    // than a bad setting.
+    if (cfg.watchers.enabled) {
+        if (cfg.watchers.max < 1) {
+            errors.append(QStringLiteral(
+                "watchers.max is %1; it must be at least 1 (or set "
+                "watchers.enabled: false)").arg(cfg.watchers.max));
+        }
+        if (cfg.watchers.threshold < 1 || cfg.watchers.threshold > 255) {
+            errors.append(QStringLiteral(
+                "watchers.threshold is %1; it is a mean absolute luma "
+                "difference and must be 1-255").arg(cfg.watchers.threshold));
+        }
+        if (cfg.watchers.min_history_frames < 1) {
+            errors.append(QStringLiteral(
+                "watchers.min_history_frames is %1; it must be at least 1 "
+                "— it divides history_bytes_per_watcher to decide how large "
+                "a region may keep history")
+                .arg(cfg.watchers.min_history_frames));
+        }
+        if (cfg.watchers.history_bytes_per_watcher < 1) {
+            errors.append(QStringLiteral(
+                "watchers.history_bytes_per_watcher is %1; it must be "
+                "positive").arg(cfg.watchers.history_bytes_per_watcher));
+        }
+        if (cfg.watchers.history_pool_bytes <
+            cfg.watchers.history_bytes_per_watcher) {
+            errors.append(QStringLiteral(
+                "watchers.history_pool_bytes (%1) is below "
+                "history_bytes_per_watcher (%2), so no watcher could ever "
+                "fill its own budget")
+                .arg(cfg.watchers.history_pool_bytes)
+                .arg(cfg.watchers.history_bytes_per_watcher));
+        }
+    }
+
     // 5. monitor rects must not overlap
     for (int i = 0; i < cfg.monitors.size(); ++i) {
         const QRect a(cfg.monitors[i].origin, cfg.monitors[i].size);
@@ -237,6 +274,7 @@ ConfigResult loadConfig(const QString& path) {
     cfg.special_keys_hotkey = yamlString(root, "special_keys_hotkey");
     cfg.paste_hotkey        = yamlString(root, "paste_hotkey");
     cfg.region_hotkey       = yamlString(root, "region_hotkey");
+    cfg.watch_hotkey        = yamlString(root, "watch_hotkey");
 
     // shortcuts list — optional. Each entry: {label: "...", keys: [...]}.
     if (const auto sc = root["shortcuts"]; sc && sc.IsSequence()) {
@@ -331,6 +369,25 @@ ConfigResult loadConfig(const QString& path) {
             m, "bind", d.bind.toStdString()));
         cfg.mcp.port    = yamlScalarOr<int>(m, "port", d.port);
         cfg.mcp.token   = yamlString(m, "token");
+    }
+
+    // watchers — all optional; the defaults are HARNESS.md §5.4 and §10.
+    if (const auto w = root["watchers"]; w) {
+        const WatchSpec d;
+        cfg.watchers.enabled     = yamlScalarOr<bool>(w, "enabled", d.enabled);
+        cfg.watchers.max         = yamlScalarOr<int>(w, "max", d.max);
+        cfg.watchers.threshold   = yamlScalarOr<int>(w, "threshold",
+                                                     d.threshold);
+        cfg.watchers.cooldown_ms = yamlScalarOr<int>(w, "cooldown_ms",
+                                                     d.cooldown_ms);
+        cfg.watchers.settle_ms   = yamlScalarOr<int>(w, "settle_ms",
+                                                     d.settle_ms);
+        cfg.watchers.history_bytes_per_watcher = yamlScalarOr<int>(
+            w, "history_bytes_per_watcher", d.history_bytes_per_watcher);
+        cfg.watchers.history_pool_bytes = yamlScalarOr<int>(
+            w, "history_pool_bytes", d.history_pool_bytes);
+        cfg.watchers.min_history_frames = yamlScalarOr<int>(
+            w, "min_history_frames", d.min_history_frames);
     }
 
     // windows

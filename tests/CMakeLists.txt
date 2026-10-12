@@ -31,3 +31,12 @@ target_link_libraries(test_mcpserver
         Qt6::Network
 )
 add_test(NAME mcpserver COMMAND test_mcpserver)
+
+qt_add_executable(test_watcher test_watcher.cpp)
+target_link_libraries(test_watcher
+    PRIVATE
+        glasshouse_watch
+        Qt6::Test
+        Qt6::Gui
+)
+add_test(NAME watcher COMMAND test_watcher)

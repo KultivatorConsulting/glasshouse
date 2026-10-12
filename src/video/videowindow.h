@@ -34,6 +34,7 @@ struct CaptureHotkeys {
     QString specialKeys;
     QString paste;
     QString region;
+    QString watch;
 };
 
 // Phase 2 + 3 viewer window:
@@ -81,6 +82,14 @@ public:
     // Used by the holder window to apply a sibling's transform when the
     // cursor is currently over the sibling.
     ApiCoord transformFor(const QPoint& globalPos) const;
+
+    // Map a global cursor position into *this* window's frame pixels,
+    // using the same letterbox maths as transformFor. Returns (-1, -1)
+    // when the position is outside the painted video rect, or before the
+    // first frame has arrived. Watchers need this to know whether the
+    // target's own captured cursor is sitting in a watched region
+    // (HARNESS.md §5.2).
+    QPoint framePointFor(const QPoint& globalPos) const;
 
     // Used as the QSettings key root for geometry persistence (one slot
     // per PiKVM host so multiple windows don't trample each other).
@@ -168,6 +177,12 @@ signals:
     // things: a model or a host tool reads the image, while the PiKVM's
     // own OCR takes a rectangle and reads its own live frame.
     void regionCaptured(const QImage& image, const QRect& frameRect);
+    // The user dragged a rectangle to watch rather than to extract
+    // (HARNESS.md §5.5 — dragging is a peer of describing one in words,
+    // not a fallback). Only the rectangle is carried: the watcher reads
+    // live frames, so the still it was drawn on is of no further use.
+    // main.cpp owns the registry and asks for the intent.
+    void watchRegionSelected(const QRect& frameRect);
     // The user asked to stop the long-running work this window is
     // showing a spinner for (by pressing the hotkey again).
     void busyCancelRequested();
@@ -226,8 +241,16 @@ private:
     // Region capture. The hotkey arrives at whichever window holds the
     // grabs, but the user means the window their pointer is over, so the
     // request is forwarded there before anything is shown.
+    // What the pending selection is for. The selector and the drag are
+    // the same in both cases; only the destination of the rectangle
+    // differs, so this is a mode on the window rather than a second
+    // widget.
+    enum class SelectPurpose { Extract, Watch };
+
     void requestRegionCapture();
-    bool beginRegionSelect();
+    void requestWatchRegion();
+    void requestSelection(SelectPurpose purpose);
+    bool beginRegionSelect(SelectPurpose purpose);
     void endRegionSelect();
 
     // Pause/restore just the Qt grabs, leaving m_captured, the pointer
@@ -265,6 +288,7 @@ private:
     int           m_specialKeysHotkey  = 0;
     int           m_pasteHotkey        = 0;
     int           m_regionHotkey       = 0;
+    int           m_watchHotkey        = 0;
 
     // m_captured: this window owns the Qt grabs (it is the holder).
     // m_sessionCaptured: *some* window in the session is the holder — true
@@ -277,6 +301,7 @@ private:
     // True while this window is showing the region selector in place of
     // its video. Input must not reach the target during that time.
     bool          m_selecting        = false;
+    SelectPurpose m_selectPurpose    = SelectPurpose::Extract;
     // The still being selected from, kept at full frame resolution so
     // the crop comes out of the original pixels rather than anything the
     // selector scaled for display.

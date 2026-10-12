@@ -12,3 +12,5 @@ Q_DECLARE_LOGGING_CATEGORY(lcJanus)
 Q_DECLARE_LOGGING_CATEGORY(lcOcr)
 // Local MCP server: HTTP transport, tool dispatch, rejected auth.
 Q_DECLARE_LOGGING_CATEGORY(lcMcp)
+// Watchers: registration, per-frame detection, firings, ring eviction.
+Q_DECLARE_LOGGING_CATEGORY(lcWatch)

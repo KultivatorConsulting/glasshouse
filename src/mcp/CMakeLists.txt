@@ -13,6 +13,7 @@ target_link_libraries(glasshouse_mcp
         glasshouse_core
         glasshouse_input
         glasshouse_video
+        glasshouse_watch
 )
 
 target_include_directories(glasshouse_mcp
@@ -26,7 +27,9 @@ qt_add_executable(glasshouse-mcpprobe mcpprobe_main.cpp)
 target_link_libraries(glasshouse-mcpprobe
     PRIVATE
         glasshouse_mcp
+        glasshouse_watch
         Qt6::Core
+        Qt6::Gui
         Qt6::Network
 )
 set_target_properties(glasshouse-mcpprobe PROPERTIES

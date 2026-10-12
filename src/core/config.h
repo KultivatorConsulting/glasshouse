@@ -132,6 +132,26 @@ struct McpSpec {
     QString token;   // optional; secret:// ref resolved like a password
 };
 
+// Watchers (HARNESS.md §5): rectangles of the target's screen checked on
+// every decoded frame, recording an event when they change.
+//
+// On by default, because the engine is inert until something registers a
+// watcher and nothing can register one without a deliberate act — the
+// hotkey drag, or an MCP tool call on a server that is itself off by
+// default. The budgets are the interesting part: history is held in
+// memory, never written to disk, and dropped with the watcher, so the
+// ceiling on retained screen content is a number set here.
+struct WatchSpec {
+    bool enabled = true;
+    int  max     = 10;             // HARNESS.md §10: ten at the ceiling
+    int  threshold  = 12;          // mean abs luma delta that counts
+    int  cooldown_ms = 3000;
+    int  settle_ms   = 600;
+    int  history_bytes_per_watcher = 16 * 1024 * 1024;
+    int  history_pool_bytes        = 96 * 1024 * 1024;
+    int  min_history_frames        = 30;   // sets the volatile area ceiling
+};
+
 // Custom chord entry for the special-keys palette / future macro-pad
 // daemon. `keys` is a list of MDN KeyboardEvent.code names (the same
 // `web_name` strings PiKVM's send_shortcut endpoint expects).
@@ -150,10 +170,12 @@ struct Config {
     QString                special_keys_hotkey;
     QString                paste_hotkey;
     QString                region_hotkey;
+    QString                watch_hotkey;
     QList<ShortcutSpec>    shortcuts;       // optional, populates the palette
     VideoSpec              video;
     OcrSpec                ocr;
     McpSpec                mcp;
+    WatchSpec              watchers;
     QList<WindowSpec>      windows;
 };
 

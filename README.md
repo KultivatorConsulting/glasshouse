@@ -51,6 +51,11 @@ What works end-to-end today:
   can't cross. Extraction has four backends; the default uses the
   PiKVM's own OCR, so it works with nothing installed and nothing
   sent off your network.
+- **[Watchers](#watchers)** — `Ctrl+Alt+Shift+W` drags out a region to
+  watch; anything that changes in it is recorded, with an optional
+  rolling buffer of crops so you can see what a change looked like
+  before it happened. Detection is local, per decoded frame, and needs
+  no OCR provider.
 - Mass Storage upload / mount / eject / present-as-CDROM.
 - Target ATX power short-press, long-press (force-off), reset — each
   gated by a confirmation dialog.
@@ -153,6 +158,7 @@ Default hotkeys (configurable per-PiKVM in YAML):
 | `Ctrl+Alt+K` | `special_keys_hotkey` | Show / hide Special Keys palette |
 | `Ctrl+Alt+Shift+V` | `paste_hotkey` | [Type the host clipboard onto the target](#clipboard-paste-and-text-extraction) |
 | `Ctrl+Alt+Shift+C` | `region_hotkey` | [Extract text from a dragged region to the host clipboard](#clipboard-paste-and-text-extraction) |
+| `Ctrl+Alt+Shift+W` | `watch_hotkey` | [Watch a dragged region and record what changes](#watchers) |
 
 ## Prep on the PiKVMs
 
@@ -346,6 +352,102 @@ Set `provider: none` to turn extraction off; the hotkey will still let
 you drag a selection and will say that nothing is configured. The paste
 hotkey is unaffected by any of this.
 
+## Watchers
+
+A watcher is a rectangle of the target's screen that Glasshouse checks on
+**every decoded frame** and records an event about whenever it changes.
+That rate is the point: a notification toast lives a few seconds, so
+anything on a timer misses most of them.
+
+Create one by dragging — `Ctrl+Alt+Shift+W`, then type what you care
+about — or from an MCP client with `glasshouse_watcher_create`. Both ask
+for the same sentence, and it is not decoration: the rectangle says
+*where* to look and nothing about *what matters there*, so whatever
+reads the event later needs it to judge.
+
+**Nothing is pushed anywhere.** Events queue in the viewer until
+something collects them with `glasshouse_watcher_poll`, which takes a
+cursor and returns one. That is deliberate — polling needs no protocol
+feature, so any MCP client works, and Glasshouse keeps no subscriber
+list, no outbound connection and no opinion about whether the consumer
+is running.
+
+Detection is local, free, and needs no OCR provider configured. It is a
+mean luma difference against the previous frame over the rectangle only,
+sampled with a stride, so a large rectangle costs about what a small one
+does.
+
+```yaml
+watch_hotkey: "Ctrl+Alt+Shift+W"
+
+watchers:
+  enabled: true
+  max: 10                  # ten is the designed ceiling
+  threshold: 12            # mean luma delta, 1-255, that counts as a change
+  cooldown_ms: 3000        # floor on how often one watcher can fire
+  settle_ms: 600           # trigger: settle — how long "quiet" has to last
+  history_bytes_per_watcher: 16777216
+  history_pool_bytes: 96000000
+  min_history_frames: 30   # sets how large a region may keep history
+```
+
+### Two triggers
+
+`change` (the default) fires the instant the region changes, which is
+what a transient needs. `settle` fires once a region that *was* changing
+has gone quiet for `settle_ms` — "the page finished loading". It is a
+per-watcher property because the two want opposite capture moments.
+
+A region that never goes quiet — a clock, a progress bar, a video —
+reports at the cooldown's rate rather than once and then never again.
+
+### History
+
+Ask for `keep_history` and the watcher keeps a rolling buffer of recent
+crops, so you can look back *through* a change instead of only at the
+frame that tripped it. Detection is always slightly late, and the most
+useful frame is often the one before.
+
+Frames are retained **on change, not on tick**, so a quiet region costs
+one frame for as long as it stays quiet, and memory scales with activity
+rather than with elapsed time. It is held in memory, never written to
+disk, and dropped when the watcher is removed.
+
+`glasshouse_watcher_frames` reads it back two ways. A **filmstrip**
+tiles many moments into one image with each one's wall-clock time drawn
+beneath it, so a model limited to a few images per request can still see
+a whole transition; **stills** returns individual crops at full
+resolution, which is what you want once the filmstrip has told you which
+moment to read.
+
+History is **refused rather than silently degraded** above an area
+ceiling (about 186,000 pixels at the default budget — roughly 500×350).
+The watcher still works; it just keeps no history, and the reply says
+which of the two you got.
+
+### Keeping the noise down
+
+The three defences, in the order they matter:
+
+1. **Drag a tight rectangle.** A sloppy one around a system tray
+   contains a clock and fires every minute.
+2. **The cooldown** stops a flicker becoming a stream of events.
+3. **The pointer is ruled out for free.** The PiKVM captures the
+   target's cursor over HDMI, so a pointer crossing the region looks
+   exactly like the event — and Glasshouse knows where it put the
+   pointer, so it suppresses detection while it is inside. If a watcher
+   has gone quiet, check `suppressed` in `glasshouse_watcher_list`: the
+   target's cursor may simply be parked in it.
+
+> **A whole-screen rectangle is not a shortcut.** The metric is a *mean*
+> over the rectangle, so a toast covering 2% of a 1080p frame moves it
+> by about 4 — under the default threshold of 12, and it will not fire
+> at all. Measured, not assumed. Watch the region you mean.
+
+The local detector is meant to be a little trigger-happy, because
+whatever reads the event is what decides whether the thing actually
+happened.
+
 ## MCP server
 
 Glasshouse can expose the running session over
@@ -395,6 +497,11 @@ stream — a `GET` returns 405 — so clients poll rather than subscribe.
 | `glasshouse_mouse_move` | Moves the pointer. `settle_ms` waits before replying, for callers about to screenshot. |
 | `glasshouse_mouse_click` | Clicks, optionally moving there first. |
 | `glasshouse_mouse_scroll` | Scrolls the wheel. |
+| `glasshouse_watcher_create` | Registers a [watcher](#watchers) on a rectangle of one screen. |
+| `glasshouse_watcher_list` | Every watcher, with fire counts and how much history it holds. |
+| `glasshouse_watcher_poll` | Events since a cursor, plus the next cursor. The only delivery path. |
+| `glasshouse_watcher_frames` | A watcher's retained crops, tiled into a filmstrip or returned as stills. |
+| `glasshouse_watcher_delete` | Removes a watcher and drops its history. |
 
 Coordinates can be screen-relative (`screen` plus `x`/`y`) or
 desktop-absolute (`desktop_x`/`desktop_y`, origin at the top-left of the

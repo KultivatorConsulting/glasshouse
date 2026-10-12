@@ -111,6 +111,17 @@ need for it.
 
 ## 5. Watchers
 
+**Built 2026-10-13**, except step 1's prompted locating. What shipped:
+the registry and detector in `src/watch/`, the `watchers/*` tool family
+of §9.1, and the manual drag of §5.5 on `Ctrl+Alt+Shift+W`. What did
+not: locating a region from a description (it needs a vision provider
+and a second request shape on `TextExtractor`), OpenCV template-matching
+for drift recovery (§6), and the judge, which is the private package's
+job. DESIGN.md §10.12 records what the measurements changed — chiefly
+that a cooldown has to re-arm a never-quiet region rather than only
+suppress it, and that a mean-over-the-rectangle metric makes a
+whole-screen watcher miss a toast entirely.
+
 The user says what to watch — in words, or by dragging the rectangle
 themselves (§5.5). Getting the rectangle happens once; checking it is
 cheap and happens continuously.

@@ -6,6 +6,7 @@
 #include "mcphttpserver.h"
 #include "pikvmclient.h"
 #include "videowindow.h"
+#include "watcher.h"
 
 #include <QBuffer>
 #include <QImage>
@@ -17,6 +18,7 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <algorithm>
+#include <QDateTime>
 
 namespace glasshouse {
 
@@ -181,6 +183,11 @@ void McpServer::callTool(const QString& name, const QJsonObject& args,
     else if (name == QLatin1String("glasshouse_mouse_move"))   toolMouseMove(args, std::move(done));
     else if (name == QLatin1String("glasshouse_mouse_click"))  toolMouseClick(args, std::move(done));
     else if (name == QLatin1String("glasshouse_mouse_scroll")) toolMouseScroll(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_create")) toolWatcherCreate(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_list"))   toolWatcherList(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_poll"))   toolWatcherPoll(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_frames")) toolWatcherFrames(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_delete")) toolWatcherDelete(args, std::move(done));
     else done({}, QStringLiteral("unknown tool: %1").arg(name));
 }
 
@@ -535,6 +542,325 @@ void McpServer::toolMouseScroll(const QJsonObject& args, Done done) {
 // Schemas
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Watchers (HARNESS.md §5, §9.1)
+// ---------------------------------------------------------------------------
+
+WatcherRegistry* McpServer::watchersOrError(QString* error) const {
+    if (!m_session.watchers) {
+        *error = QStringLiteral("watchers are disabled — set "
+                                "`watchers.enabled: true` in config.yaml");
+        return nullptr;
+    }
+    return m_session.watchers;
+}
+
+namespace {
+
+QString isoOf(qint64 ms) {
+    if (ms <= 0) return {};
+    return QDateTime::fromMSecsSinceEpoch(ms).toString(Qt::ISODateWithMs);
+}
+
+QJsonObject pngContent(const QImage& img) {
+    QByteArray png;
+    QBuffer buf(&png);
+    buf.open(QIODevice::WriteOnly);
+    if (!img.save(&buf, "PNG")) return {};
+    buf.close();
+    return QJsonObject{{"type", "image"},
+                       {"mimeType", "image/png"},
+                       {"data", QString::fromLatin1(png.toBase64())}};
+}
+
+QJsonObject watcherJson(const WatcherDef& d, const WatcherStats& st) {
+    QJsonObject o{
+        {"id", d.id},
+        {"screen", d.screen},
+        {"rect", QJsonObject{{"x", d.rect.x()}, {"y", d.rect.y()},
+                             {"w", d.rect.width()}, {"h", d.rect.height()}}},
+        {"intent", d.intent},
+        {"origin", watcherOriginName(d.origin)},
+        {"trigger", watcherTriggerName(d.trigger)},
+        {"threshold", d.threshold},
+        {"cooldown_ms", d.cooldownMs},
+        {"fires", st.fires},
+        {"last_delta", st.lastDelta},
+        {"history_frames", st.ringFrames},
+        {"history_bytes", double(st.ringBytes)},
+    };
+    if (d.trigger == WatcherTrigger::Settle) {
+        o.insert(QStringLiteral("settle_ms"), d.settleMs);
+    }
+    if (!st.lastFireMs) {
+        o.insert(QStringLiteral("last_fire"), QJsonValue::Null);
+    } else {
+        o.insert(QStringLiteral("last_fire"), isoOf(st.lastFireMs));
+    }
+    o.insert(QStringLiteral("keep_history"), d.volatileGranted);
+    if (d.volatileWanted && !d.volatileGranted) {
+        o.insert(QStringLiteral("history_refused"),
+                 QStringLiteral("the rectangle is too large to buffer"));
+    }
+    if (st.suppressed) {
+        o.insert(QStringLiteral("suppressed"),
+                 QStringLiteral("the target's pointer is in this region, so "
+                                "detection is paused"));
+    }
+    return o;
+}
+
+}  // namespace
+
+void McpServer::toolWatcherCreate(const QJsonObject& args, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+    const McpScreen* sc = screenFor(args, &error);
+    if (!sc) { done({}, error); return; }
+
+    WatcherDef d;
+    d.screen = sc->index;
+    d.origin = WatcherOrigin::Described;
+    d.rect   = QRect(intArg(args, "x", 0), intArg(args, "y", 0),
+                     intArg(args, "w", 0), intArg(args, "h", 0));
+    d.intent = args.value(QStringLiteral("intent")).toString().trimmed();
+    if (const QString t = args.value(QStringLiteral("trigger")).toString();
+        !t.isEmpty()) {
+        if (!parseWatcherTrigger(t, &d.trigger, &error)) {
+            done({}, error);
+            return;
+        }
+    }
+    d.threshold      = intArg(args, "threshold", 0);
+    d.cooldownMs     = intArg(args, "cooldown_ms", 0);
+    d.settleMs       = intArg(args, "settle_ms", 0);
+    d.notify         = args.value(QStringLiteral("notify")).toBool();
+    d.volatileWanted = args.value(QStringLiteral("keep_history")).toBool();
+
+    const int id = reg->create(d, &error);
+    if (id == 0) { done({}, error); return; }
+
+    WatcherDef stored;
+    reg->get(id, &stored);
+    QJsonObject payload = watcherJson(stored, reg->stats(id));
+    payload.insert(QStringLiteral("next_step"),
+                   QStringLiteral("Call glasshouse_watcher_poll to collect "
+                                  "events; nothing is pushed to you."));
+    if (stored.volatileWanted && !stored.volatileGranted) {
+        payload.insert(
+            QStringLiteral("note"),
+            QStringLiteral("History was refused because the rectangle covers "
+                           "more than %1 pixels. The watcher works; it just "
+                           "keeps no history. A tighter rectangle gets it.")
+                .arg(reg->limits().volatileAreaCeiling()));
+    }
+
+    // §11: a watcher is a standing read of the target's screen, so the user
+    // should be able to see one appear rather than discovering it later.
+    emit toolActivity(QStringLiteral("MCP: watching %1x%2 on screen %3 — %4")
+                          .arg(stored.rect.width()).arg(stored.rect.height())
+                          .arg(stored.screen).arg(stored.intent));
+
+    done(textContent(QString::fromUtf8(
+             QJsonDocument(payload).toJson(QJsonDocument::Indented))), {});
+}
+
+void McpServer::toolWatcherList(const QJsonObject&, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+
+    QJsonArray arr;
+    for (const auto& d : reg->list()) {
+        arr.append(watcherJson(d, reg->stats(d.id)));
+    }
+    const QJsonObject payload{
+        {"watchers", arr},
+        {"cursor", double(reg->cursor())},
+        {"limit", reg->limits().maxWatchers},
+    };
+    done(textContent(QString::fromUtf8(
+             QJsonDocument(payload).toJson(QJsonDocument::Indented))), {});
+}
+
+void McpServer::toolWatcherPoll(const QJsonObject& args, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+
+    const qint64 cursor = qint64(
+        args.value(QStringLiteral("cursor")).toDouble(0));
+    qint64 next = 0;
+    const auto events = reg->eventsSince(cursor, &next);
+
+    const bool wantImages = args.value(QStringLiteral("include_images")).toBool();
+    const int  maxImages  = std::max(0, intArg(args, "max_images", 4));
+
+    QJsonArray arr;
+    QJsonArray content;
+    int attached = 0;
+    for (const auto& ev : events) {
+        QJsonObject o{
+            {"watcher", ev.id},
+            {"seq", double(ev.seq)},
+            {"at", isoOf(ev.wallMs)},
+            {"intent", ev.intent},
+            {"screen", ev.screen},
+            {"delta", ev.delta},
+            {"rect", QJsonObject{{"x", ev.rect.x()}, {"y", ev.rect.y()},
+                                 {"w", ev.rect.width()},
+                                 {"h", ev.rect.height()}}},
+        };
+        if (wantImages && attached < maxImages && !ev.crop.isNull()) {
+            const QJsonObject img = pngContent(ev.crop);
+            if (!img.isEmpty()) {
+                content.append(img);
+                o.insert(QStringLiteral("image_index"), attached);
+                attached++;
+            }
+        }
+        arr.append(o);
+    }
+
+    QJsonObject payload{
+        {"events", arr},
+        {"next_cursor", double(next)},
+        {"count", arr.size()},
+    };
+    if (attached > 0) {
+        payload.insert(QStringLiteral("images"),
+                       QStringLiteral("%1 attached, in the order the events "
+                                      "are listed; `image_index` on an event "
+                                      "says which is which")
+                           .arg(attached));
+    }
+    if (arr.isEmpty()) {
+        payload.insert(QStringLiteral("note"),
+                       QStringLiteral("Nothing since that cursor. Poll again "
+                                      "with next_cursor."));
+    }
+
+    // Text first so a client that reads one block gets the structure, not
+    // an unlabelled picture.
+    QJsonArray out;
+    out.append(QJsonObject{{"type", "text"},
+                           {"text", QString::fromUtf8(
+                                QJsonDocument(payload)
+                                    .toJson(QJsonDocument::Indented))}});
+    for (const auto& c : content) out.append(c);
+    done(QJsonObject{{"content", out}}, {});
+}
+
+void McpServer::toolWatcherFrames(const QJsonObject& args, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+
+    const int id = intArg(args, "id", 0);
+    WatcherDef d;
+    if (!reg->get(id, &d)) {
+        done({}, QStringLiteral("no watcher with id %1").arg(id));
+        return;
+    }
+    if (!d.volatileGranted) {
+        done({}, QStringLiteral("watcher %1 keeps no history — it was "
+                                "created without keep_history, or the "
+                                "rectangle was too large for it")
+                     .arg(id));
+        return;
+    }
+
+    const QString mode = args.value(QStringLiteral("mode")).toString()
+                             .trimmed().toLower();
+    const bool stills = mode == QLatin1String("stills");
+    const int lastSeconds = std::max(1, intArg(args, "last_seconds", 60));
+    const int limit = std::max(1, intArg(args, "limit", stills ? 4 : 12));
+
+    const qint64 from = QDateTime::currentMSecsSinceEpoch() -
+                        qint64(lastSeconds) * 1000;
+    const auto frames = reg->frames(id, from, 0, limit);
+    if (frames.isEmpty()) {
+        done(textContent(QStringLiteral(
+                 "watcher %1 has no retained frames in the last %2s. It "
+                 "retains on change, so a region that has been quiet holds "
+                 "only its baseline.").arg(id).arg(lastSeconds)), {});
+        return;
+    }
+
+    QJsonArray content;
+    QJsonArray listed;
+    for (const auto& f : frames) {
+        listed.append(QJsonObject{{"at", isoOf(f.wallMs)},
+                                  {"delta", f.delta}});
+    }
+
+    if (stills) {
+        for (const auto& f : frames) {
+            const QJsonObject img = pngContent(f.crop);
+            if (!img.isEmpty()) content.append(img);
+        }
+    } else {
+        const int cols = std::max(1, intArg(args, "cols", 4));
+        const QImage strip = WatcherRegistry::filmstrip(frames, cols, 0);
+        if (strip.isNull()) {
+            done({}, QStringLiteral("failed to build a filmstrip"));
+            return;
+        }
+        const QJsonObject img = pngContent(strip);
+        if (img.isEmpty()) {
+            done({}, QStringLiteral("failed to encode the filmstrip"));
+            return;
+        }
+        content.append(img);
+    }
+
+    const QJsonObject payload{
+        {"watcher", id},
+        {"intent", d.intent},
+        {"mode", stills ? QStringLiteral("stills")
+                        : QStringLiteral("filmstrip")},
+        {"frames", listed},
+        {"window_seconds", lastSeconds},
+        {"note", stills
+                     ? QStringLiteral("Full-resolution crops, oldest first.")
+                     : QStringLiteral("One image, tiled oldest-first with "
+                                      "each frame's wall-clock time beneath "
+                                      "it. Ask for mode=stills to read one "
+                                      "moment at full resolution.")},
+    };
+
+    QJsonArray out;
+    out.append(QJsonObject{{"type", "text"},
+                           {"text", QString::fromUtf8(
+                                QJsonDocument(payload)
+                                    .toJson(QJsonDocument::Indented))}});
+    for (const auto& c : content) out.append(c);
+    done(QJsonObject{{"content", out}}, {});
+}
+
+void McpServer::toolWatcherDelete(const QJsonObject& args, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+
+    if (args.value(QStringLiteral("all")).toBool()) {
+        const int n = reg->count();
+        reg->clear();
+        emit toolActivity(QStringLiteral("MCP: removed %1 watcher(s)").arg(n));
+        done(textContent(QStringLiteral("removed %1 watcher(s)").arg(n)), {});
+        return;
+    }
+
+    const int id = intArg(args, "id", 0);
+    if (!reg->remove(id)) {
+        done({}, QStringLiteral("no watcher with id %1").arg(id));
+        return;
+    }
+    emit toolActivity(QStringLiteral("MCP: watcher %1 removed").arg(id));
+    done(textContent(QStringLiteral("watcher %1 removed").arg(id)), {});
+}
+
 QJsonArray McpServer::toolSchemas() const {
     const auto obj = [](QJsonObject props, QStringList required = {}) {
         QJsonObject schema{{"type", "object"}, {"properties", props}};
@@ -665,6 +991,125 @@ QJsonArray McpServer::toolSchemas() const {
         {"inputSchema", obj({
             {"dx", integer("Horizontal wheel delta.")},
             {"dy", integer("Vertical wheel delta.")},
+        })}});
+
+    // ----------------------------------------------------------------- watchers
+    const QJsonObject watcherIdProp =
+        integer("Watcher id, as glasshouse_watcher_create or "
+                "glasshouse_watcher_list reports it.");
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_create"},
+        {"description",
+         "Watch a rectangle of one screen and record an event whenever it "
+         "changes. Detection is local and runs on every decoded frame, so "
+         "it catches things that are gone in a second — a notification "
+         "toast, a badge appearing on a taskbar icon, a dialog. Nothing is "
+         "pushed anywhere: collect events with glasshouse_watcher_poll. "
+         "`intent` is required and is not decoration — the rectangle says "
+         "where to look and nothing about what matters there, and whoever "
+         "reads the event needs the sentence to judge it. Take the "
+         "rectangle from a glasshouse_screenshot at max_width 0, whose "
+         "pixels are the frame's own."},
+        {"inputSchema", obj({
+            {"screen", screenProp},
+            {"x", integer("Left edge in the screen's own frame pixels.")},
+            {"y", integer("Top edge in the screen's own frame pixels.")},
+            {"w", integer("Width in frame pixels.")},
+            {"h", integer("Height in frame pixels.")},
+            {"intent", QJsonObject{{"type", "string"},
+                {"description",
+                 "What to care about here, in words, e.g. \"a bullet with a "
+                 "number over the Chrome icon means new mail\". Carried on "
+                 "every event this watcher produces."}}},
+            {"trigger", QJsonObject{{"type", "string"},
+                {"enum", QJsonArray{"change", "settle"}},
+                {"description",
+                 "change (default) fires the instant the region changes, "
+                 "which is what a transient needs. settle fires once a "
+                 "region that was changing has gone quiet, which is what "
+                 "\"the page finished loading\" needs."}}},
+            {"threshold", integer(
+                "Mean absolute luma change, 1-255, that counts as a change. "
+                "Default 12. Lower is more sensitive; being trigger-happy "
+                "is fine, since whoever reads the event decides whether it "
+                "mattered.")},
+            {"cooldown_ms", integer(
+                "Floor on how often this watcher can fire. Default 3000. "
+                "Also the rate at which a region that never goes quiet — a "
+                "clock, a progress bar — reports.")},
+            {"settle_ms", integer(
+                "trigger=settle only: how long the region must be quiet "
+                "before it counts as settled. Default 600.")},
+            {"keep_history", QJsonObject{{"type", "boolean"},
+                {"description",
+                 "Keep a rolling buffer of recent crops so you can look "
+                 "back through a change rather than only at the frame that "
+                 "tripped it — detection is always slightly late, and the "
+                 "most useful frame is often the one before. Refused for a "
+                 "large rectangle rather than silently degraded; the reply "
+                 "says which you got. Fetch with glasshouse_watcher_frames."}}},
+            {"notify", QJsonObject{{"type", "boolean"},
+                {"description", "Ask the viewer to surface the firing to "
+                                "the user as well as recording it."}}},
+        }, {"intent"})}});
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_list"},
+        {"description", "Every registered watcher, with how often it has "
+                        "fired, how much history it is holding and whether "
+                        "the target's pointer is currently sitting in it "
+                        "(which suppresses detection)."},
+        {"inputSchema", obj({})}});
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_poll"},
+        {"description",
+         "Collect watcher events recorded since `cursor`, and get the "
+         "cursor to pass next time. This is the only way events are "
+         "delivered — the viewer never pushes — so poll it on whatever "
+         "interval suits; every 10-30 s is ample, because the history "
+         "buffer is what stops anything being missed, not the poll rate. "
+         "Pass 0 (or omit) the first time to drain whatever is buffered."},
+        {"inputSchema", obj({
+            {"cursor", integer("The next_cursor from your previous poll. "
+                               "Omit or 0 to get everything buffered.")},
+            {"include_images", QJsonObject{{"type", "boolean"},
+                {"description", "Attach a thumbnail of what tripped each "
+                                "event. Off by default to keep polling "
+                                "cheap."}}},
+            {"max_images", integer("Cap on attached thumbnails. Default 4.")},
+        })}});
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_frames"},
+        {"description",
+         "Read a watcher's retained history (keep_history watchers only). "
+         "In filmstrip mode, many moments are tiled into one image with "
+         "each one's wall-clock time under it, so a model limited to a few "
+         "images per request can still see a whole transition; in stills "
+         "mode each frame comes back at full resolution, which is what you "
+         "want once the filmstrip has told you which moment to read."},
+        {"inputSchema", obj({
+            {"id", watcherIdProp},
+            {"last_seconds", integer("Look back this many seconds from now. "
+                                     "Default 60.")},
+            {"mode", QJsonObject{{"type", "string"},
+                {"enum", QJsonArray{"filmstrip", "stills"}},
+                {"description", "filmstrip (default) tiles the frames into "
+                                "one image; stills returns them separately."}}},
+            {"limit", integer("Most frames to return. Default 12 for a "
+                              "filmstrip, 4 for stills.")},
+            {"cols", integer("filmstrip only: tiles per row. Default 4.")},
+        }, {"id"})}});
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_delete"},
+        {"description", "Remove a watcher and drop its retained history."},
+        {"inputSchema", obj({
+            {"id", watcherIdProp},
+            {"all", QJsonObject{{"type", "boolean"},
+                {"description", "Remove every watcher instead of one."}}},
         })}});
 
     return tools;

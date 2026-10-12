@@ -92,6 +92,43 @@ ocr:
   # All providers. Generous on purpose — PiKVM-side OCR is not fast.
   timeout_ms: 60000
 
+# Watch a dragged region and record what changes (HARNESS.md §5).
+# Ctrl+Alt+Shift+W drags the rectangle; you are then asked what to look
+# for, because the rectangle says where to look and not what matters.
+# Detection is local and needs no ocr.provider.
+watch_hotkey: "Ctrl+Alt+Shift+W"
+
+watchers:
+  enabled: true
+
+  # Ten is the designed ceiling; four or five is realistic.
+  max: 10
+
+  # Mean absolute luma change over the region, 1-255, that counts as a
+  # change. Being trigger-happy is fine — whatever reads the event is
+  # what decides whether it mattered. Note the metric is a MEAN over the
+  # rectangle, so a whole-screen watcher will miss a toast entirely.
+  threshold: 12
+
+  # Floor on how often one watcher can fire. Also the rate at which a
+  # region that never goes quiet (a clock, a progress bar) reports.
+  cooldown_ms: 3000
+
+  # trigger: settle only — how long the region has to be quiet before it
+  # counts as settled.
+  settle_ms: 600
+
+  # Rolling history for watchers created with keep_history. Held in
+  # memory, never written to disk, dropped with the watcher. Retention is
+  # change-driven, so a quiet region costs one frame.
+  history_bytes_per_watcher: 16777216   # 16 MB
+  history_pool_bytes:        96000000   # across all of them
+
+  # Divides the per-watcher budget to decide how large a region may keep
+  # history: 16 MB / 30 frames / 3 bytes a pixel is about 186,000 px,
+  # roughly 500x350. Above it, history is refused rather than degraded.
+  min_history_frames: 30
+
 # Local MCP server (DESIGN.md §10.11). Exposes the running session to any
 # MCP client: screen indexes, the combined desktop, screenshots, typing,
 # key chords and pointer control.

@@ -83,6 +83,10 @@ private slots:
     void ocrExplicitProviderBeatsTheApiKeyHeuristic();
     void ocrEndpointDefaultsPerProvider();
     void ocrRejectsAnUnknownProvider();
+
+    void watchersDefaultOnWithTheDesignedBudgets();
+    void watchersParseTheirBlock();
+    void watchersRejectABudgetThatCannotBeDivided();
 };
 
 void TestConfig::validConfigAccepts() {
@@ -243,6 +247,69 @@ void TestConfig::ocrRejectsAnUnknownProvider() {
     QVERIFY(dir.isValid());
     const auto r = loadWith(dir, QStringLiteral("ocr:\n  provider: magic\n"));
     QVERIFY(anyErrorContains(r.errors, QStringLiteral("not one of")));
+}
+
+// ---------------------------------------------------------------------------
+// Watchers. The budgets are not cosmetic: min_history_frames divides the
+// per-watcher byte budget to derive the area ceiling, so a zero there is a
+// division by zero rather than a silly setting.
+
+void TestConfig::watchersDefaultOnWithTheDesignedBudgets() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto r = loadWith(dir, QString());
+    QVERIFY2(r.errors.isEmpty(), qPrintable(r.errors.join(QStringLiteral("; "))));
+    QVERIFY(r.config->watchers.enabled);
+    QCOMPARE(r.config->watchers.max, 10);
+    QCOMPARE(r.config->watchers.threshold, 12);
+    QCOMPARE(r.config->watchers.min_history_frames, 30);
+}
+
+void TestConfig::watchersParseTheirBlock() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto r = loadWith(dir, QStringLiteral(
+        "watch_hotkey: \"Ctrl+Alt+W\"\n"
+        "watchers:\n"
+        "  enabled: false\n"
+        "  max: 3\n"
+        "  threshold: 40\n"
+        "  cooldown_ms: 500\n"
+        "  settle_ms: 250\n"
+        "  min_history_frames: 10\n"));
+    QVERIFY2(r.errors.isEmpty(), qPrintable(r.errors.join(QStringLiteral("; "))));
+    QVERIFY(!r.config->watchers.enabled);
+    QCOMPARE(r.config->watchers.max, 3);
+    QCOMPARE(r.config->watchers.threshold, 40);
+    QCOMPARE(r.config->watchers.cooldown_ms, 500);
+    QCOMPARE(r.config->watchers.settle_ms, 250);
+    QCOMPARE(r.config->watchers.min_history_frames, 10);
+    QCOMPARE(r.config->watch_hotkey, QStringLiteral("Ctrl+Alt+W"));
+}
+
+void TestConfig::watchersRejectABudgetThatCannotBeDivided() {
+    Config c = makeValid();
+    c.watchers.min_history_frames = 0;
+    QVERIFY(anyErrorContains(validateConfig(c),
+                             QStringLiteral("min_history_frames")));
+
+    c = makeValid();
+    c.watchers.threshold = 0;
+    QVERIFY(anyErrorContains(validateConfig(c),
+                             QStringLiteral("watchers.threshold")));
+
+    c = makeValid();
+    c.watchers.history_pool_bytes = 1024;
+    QVERIFY(anyErrorContains(validateConfig(c),
+                             QStringLiteral("history_pool_bytes")));
+
+    // Disabled watchers are not validated: a half-filled block someone
+    // turned off should not stop the viewer starting.
+    c = makeValid();
+    c.watchers.enabled = false;
+    c.watchers.min_history_frames = 0;
+    c.watchers.threshold = 0;
+    QCOMPARE(validateConfig(c), QStringList{});
 }
 
 QTEST_APPLESS_MAIN(TestConfig)

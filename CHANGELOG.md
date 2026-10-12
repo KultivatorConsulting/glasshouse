@@ -43,6 +43,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consequence: that provider reads the screen as it is when the request
   lands, while the others read the still the user froze.
 
+- **Watchers** (`Ctrl+Alt+Shift+W`, or `glasshouse_watcher_create` over
+  MCP). Drag a rectangle, say what matters about it, and Glasshouse
+  checks it on every decoded frame and records an event whenever it
+  changes — which is the rate a notification toast needs, since one
+  lives a few seconds and anything on a timer misses most of them.
+  Detection is local, needs no OCR provider and never leaves the
+  machine: a strided luma difference against the previous frame over
+  the rectangle only, so a large region costs about what a small one
+  does.
+  - `change` fires the instant a region changes; `settle` fires once a
+    region that was changing has gone quiet. A region that never goes
+    quiet reports at its cooldown's rate rather than once and then
+    never again.
+  - The target's cursor is captured over HDMI, so a pointer crossing
+    the region looks exactly like the event — detection is suppressed
+    while Glasshouse's own pointer is inside, and `watcher_list` says
+    when that is why nothing is firing.
+  - `keep_history` keeps a rolling buffer of crops so you can look back
+    *through* a change rather than only at the frame that tripped it.
+    Retained on change rather than on tick, held in memory, never
+    written to disk, dropped with the watcher, and refused outright
+    above ~186,000 px rather than silently degraded.
+  - `glasshouse_watcher_frames` reads it back as a filmstrip — many
+    moments tiled into one image with wall-clock times drawn under
+    them, which gets a timeseries past a four-images-per-request limit
+    — or as full-resolution stills.
+  - **Nothing is pushed.** Events queue until something collects them
+    with `glasshouse_watcher_poll`, which takes a cursor and returns
+    the next one. Polling needs no protocol feature, so any MCP client
+    works and the viewer keeps no subscriber list.
+  - Budgets and the hotkey are configurable under `watchers:` in
+    config.yaml. See DESIGN.md §10.12 and HARNESS.md §5.
+
 ### Documentation
 - **The providers are now measured against each other, not just
   described.** On identical crops of one snapshot, Tui answered 3–4×
@@ -51,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   git SHA). The README's provider section and DESIGN.md §10.10 carry
   the figures, so choosing between "nothing leaves the LAN" and "gets
   the characters right" is an informed choice rather than a guess.
+- **A whole-screen watcher is documented as a trap, not a shortcut.**
+  The change metric is a mean over the rectangle, so a toast covering
+  2% of a 1080p frame moves it by about 4 against a default threshold
+  of 12 — it never fires. Measured, and now said plainly in both the
+  README and DESIGN.md §10.12.
 - **Each provider's upper limit is now written down**, because past a
   certain selection size they fail rather than slow down: `pikvm`
   returns 504 once kvmd's nginx times out at 60 s, and `tui` returns
