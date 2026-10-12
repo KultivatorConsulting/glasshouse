@@ -15,6 +15,11 @@ bugs. The areas of the code most likely to carry security impact are:
   reconnects, and TOTP composition.
 - Secret resolution in `src/core/secrets.cpp` and the
   `~/.config/glasshouse/secrets.yaml` permissions check.
+- The optional MCP server in `src/mcp/` — the hand-written HTTP front
+  end's request parsing and limits, and bearer-token enforcement.
+  Anything reaching that port can type on and click the target, so
+  treat an authentication bypass or a bind-address escape as
+  high impact.
 - Mass-storage upload paths in `src/video/msddialog.cpp` (file size /
   name handling crossing the kvmd boundary).
 - Anything that lets a malicious or compromised PiKVM run code on the
@@ -28,7 +33,13 @@ coordinate disclosure timing over email.
 
 ## Out of scope
 
-Glasshouse is a desktop client; it has no server component of its
-own. Vulnerabilities in the PiKVM firmware itself (kvmd, ustreamer,
-Janus) are out of scope here — please report those upstream at
+Glasshouse is a desktop client. Its one listening socket is the
+optional MCP server (`mcp.enabled`), which is off by default and binds
+to loopback unless configured otherwise — exposing it deliberately to
+a wider interface is a configuration choice, not a vulnerability, but
+anything that defeats its token or escapes its configured bind address
+is in scope.
+
+Vulnerabilities in the PiKVM firmware itself (kvmd, ustreamer, Janus)
+are out of scope here — please report those upstream at
 <https://github.com/pikvm/>.

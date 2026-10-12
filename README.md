@@ -14,14 +14,16 @@ list of PiKVM API quirks Glasshouse works around live in
 
 ## Status
 
-**v0.1.3 — current.** First public release was v0.1.0 in April 2026;
-three patch releases since landed input fixes surfaced by daily use:
+**v0.1.4 — current.** First public release was v0.1.0 in April 2026;
+the patch releases since landed input fixes surfaced by daily use:
 shifted-symbol keys (`?`, `(`, `)`, …) routed via the physical-key
 MDN code, mouse-wheel sub-notch accumulation for high-resolution
 wheels and Wayland touchpads, and an ergonomic release-hotkey
-default (`Ctrl+Alt+Shift+Backspace`). All Phase 0–8 work in
-[DESIGN.md §9](specs/DESIGN.md) is complete. The viewer is in daily
-use against a live two-PiKVM (PiKVM 4 Plus + PiKVM 3) setup.
+default (`Ctrl+Alt+Shift+Backspace`). v0.1.4 adds an opt-in
+[MCP server](#mcp-server) so other tools can drive the session.
+All Phase 0–8 work in [DESIGN.md §9](specs/DESIGN.md) is complete.
+The viewer is in daily use against a live two-PiKVM (PiKVM 4 Plus +
+PiKVM 3) setup.
 
 What works end-to-end today:
 
@@ -47,6 +49,9 @@ What works end-to-end today:
   gated by a confirmation dialog.
 - Per-PiKVM window geometry / fullscreen / maximized state persists
   across sessions.
+- **An optional local [MCP server](#mcp-server)** exposing the session
+  — screen layout, screenshots, typing, key chords and pointer control
+  — to any MCP client. Off by default.
 - `.deb` packaging built by GitHub Actions on tag push, linked against
   system Qt 6.4 from the noble apt archive (no bundled Qt).
 
@@ -120,6 +125,10 @@ glasshouse-viewer
 # Bring up only one window (e.g. for ad-hoc testing).
 glasshouse-viewer --only 192.168.1.71
 
+# Report the compiled version and exit — the quick way to tell whether
+# the installed package is the code you are looking at.
+glasshouse-viewer --version
+
 # Append all log messages to a file in addition to stderr. Honours
 # QT_LOGGING_RULES — pair with one to dump verbose categories.
 glasshouse-viewer --log-file /tmp/glasshouse.log
@@ -154,6 +163,84 @@ Default hotkeys (configurable per-PiKVM in YAML):
 No PiKVM firmware modifications are required. Glasshouse works against
 stock kvmd / ustreamer; cold-start quirks (encoder warmup, older-
 firmware pre-IDR 503s) are handled client-side.
+
+## MCP server
+
+Glasshouse can expose the running session over
+[MCP](https://modelcontextprotocol.io/) so other tools can see the
+target's screens and drive its keyboard and mouse. It runs **inside the
+viewer**, because the tools need the decoded video frames and the
+session view — which head is where, which PiKVM carries HID — and
+neither exists in a separate process.
+
+**It is off by default, and it is a remote-control surface.** Anything
+that can reach the port can type on the target and click on it. Turn it
+on deliberately, leave `bind` on loopback unless you have a specific
+reason not to, and set a `token` if anything else shares the machine.
+
+### Enable it
+
+```yaml
+mcp:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 8765
+  # token: "secret://mcp_token"     # requires Authorization: Bearer <value>
+```
+
+`token` is a `secret://` reference resolved exactly like a PiKVM
+password (see [Configure secrets](#configure-secrets)). If it is set but
+cannot be resolved, **the server does not start** — it will not fall
+back to listening unauthenticated.
+
+Restart the viewer, then register it with a client:
+
+```bash
+claude mcp add --transport http glasshouse http://127.0.0.1:8765/mcp
+```
+
+The transport is plain `POST` JSON-RPC over HTTP. There is no SSE
+stream — a `GET` returns 405 — so clients poll rather than subscribe.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `glasshouse_session` | Screens, each head's rectangle within the combined desktop, which PiKVM carries HID. Call it first. |
+| `glasshouse_screenshot` | Current frame of one screen as a PNG, downscaled to `max_width` (`0` for native). |
+| `glasshouse_type` | Types text through the HID master. |
+| `glasshouse_keys` | Presses a key or a chord, pressed in order and released in reverse. |
+| `glasshouse_mouse_move` | Moves the pointer. `settle_ms` waits before replying, for callers about to screenshot. |
+| `glasshouse_mouse_click` | Clicks, optionally moving there first. |
+| `glasshouse_mouse_scroll` | Scrolls the wheel. |
+
+Coordinates can be screen-relative (`screen` plus `x`/`y`) or
+desktop-absolute (`desktop_x`/`desktop_y`, origin at the top-left of the
+combined desktop). Both map exactly: the monitor layout is configured
+and verified against the streamer, so a desktop pixel converts straight
+to absolute HID coordinates with **no calibration step**.
+
+> **Watch the two numbering schemes.** `screen` is a 0-based index into
+> the list `glasshouse_session` returns. `target_monitor` / `monitor_id`
+> in your config is 1-based. The monitor you call "screen 2" is
+> `screen: 1` to these tools; `glasshouse_session` reports both so you
+> can check.
+
+Every input tool refuses unless there is a HID master that is connected
+and whose kvmd reports the target's HID online, and says which of those
+failed — a keystroke that goes nowhere is worse than a refusal. Tool
+calls flash on the status bar of every window, because something else
+driving your keyboard should not be silent.
+
+### Trying it without hardware
+
+```bash
+./build/bin/glasshouse-mcpprobe        # synthetic two-head session on 18766
+```
+
+Serves a 3840×1080 two-screen session with no PiKVMs attached, so you
+can inspect the tool surface and schemas. The input tools correctly
+refuse, since there is no HID master to route to.
 
 ## Build from source
 
@@ -206,6 +293,9 @@ The first configure downloads yaml-cpp 0.8.0 from GitHub via
 # Janus signalling probe — drives info → create → attach → watch and
 # logs the SDP offer; useful when diagnosing transport failures.
 ./build/bin/glasshouse-janusprobe --host <pikvm>
+
+# MCP probe — synthetic two-head session on 18766, no PiKVMs needed.
+./build/bin/glasshouse-mcpprobe
 ```
 
 ## Project layout
@@ -221,6 +311,7 @@ glasshouse/
 ├── LICENSE                     LGPL-3.0 (top-level for GitHub auto-detection)
 ├── LICENSES/                   LGPL-3.0 + MDI icon NOTICE
 ├── specs/DESIGN.md             architectural source of truth
+├── specs/HARNESS.md            design for the harness built on the MCP server
 ├── pikvm_coord_verify.py       Phase 0 coord-space regression script
 ├── config/example.yaml         reference config matching DESIGN.md §8
 ├── dist/
@@ -233,9 +324,11 @@ glasshouse/
 ├── src/video/                  Janus client, GStreamer pipelines, VideoWindow,
 │                               Special Keys & Mass Storage dialogs
 ├── src/input/                  CoordTransform, InputRouter, MDN keymap
+├── src/mcp/                    HTTP front end, MCP protocol, tools, glasshouse-mcpprobe
 ├── src/cli/                    glasshouse-cli (Phase 1 harness)
 ├── src/viewer/                 glasshouse-viewer (the GUI; ties everything together)
-└── tests/                      QTest: config validator, coord transform, keymap
+└── tests/                      QTest: config validator, coord transform, keymap,
+                                MCP transport + protocol
 ```
 
 ## Troubleshooting
@@ -317,7 +410,12 @@ don't open public issues for those.
 ## Design and references
 
 - [specs/DESIGN.md](specs/DESIGN.md) — architecture, coord model,
-  PiKVM API subset, empirical verifications.
+  PiKVM API subset, empirical verifications. The MCP server is §10.11.
+- [specs/HARNESS.md](specs/HARNESS.md) — where the MCP server is
+  going: watchers, frame-change detection, and what consumes the
+  events.
+- [Model Context Protocol](https://modelcontextprotocol.io/) — the
+  protocol the server speaks.
 - [CHANGELOG.md](CHANGELOG.md) — what changed, version by version.
 - [PiKVM handbook](https://docs.pikvm.org/)
 - [PiKVM HTTP API reference](https://docs.pikvm.org/api/)

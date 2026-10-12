@@ -5,7 +5,7 @@ All notable changes to Glasshouse Viewer are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.4] - 2026-10-12
 
 ### Added
 - **A local MCP server, off by default** (`mcp.enabled`). Exposes the
@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enable debug logging without setting the env var.
 
 ### Fixed
+- **The viewer aborted when an MCP tool answered after its request
+  returned.** `handleRequest` captured its JSON-RPC responder by
+  reference, so it lived on a stack frame that was gone by the time an
+  asynchronous tool called back: `glasshouse_mouse_move` with
+  `settle_ms`, and `glasshouse_type` waiting on `pasteFinished`.
+  Invoking the destroyed `std::function` threw `bad_function_call`,
+  which nothing caught, so the process terminated. Every synchronous
+  tool was unaffected, which is why this only showed up on the first
+  live pointer move. Responders are now captured by value.
 - **Every link to the repository was a 404.** The URLs said
   `kultivator-consulting`; the organisation is `KultivatorConsulting`.
   Nine occurrences, including the About box link, the `homepage` field
@@ -334,7 +343,8 @@ PiKVM web UIs" pattern for managing remote target machines.
   shared source of truth between the Special Keys palette and a
   future keypad daemon, but the daemon itself is separate work.
 
-[Unreleased]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/KultivatorConsulting/glasshouse/compare/v0.1.0...v0.1.1

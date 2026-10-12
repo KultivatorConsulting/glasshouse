@@ -40,6 +40,11 @@ keymap).
   is exercised by the harnesses against real hardware. Pure-function
   code — config validation, coord transform, keymap — must have QTest
   coverage in `tests/`.
+- **Verify input paths on live hardware.** The MCP input tools and the
+  capture/pointer code cannot be unit tested end to end: every MCP
+  input tool is gated behind a connected HID master, so neither the
+  test suite nor `glasshouse-mcpprobe` can reach the code that runs in
+  anger. Drive the real thing before shipping a change to them.
 - **Don't modify the PiKVM.** Glasshouse runs against stock firmware;
   workarounds for firmware quirks live client-side. If you find
   yourself wanting to patch kvmd or ustreamer, find a client-side
@@ -56,9 +61,13 @@ page](https://github.com/KultivatorConsulting/glasshouse/releases).
 Untagged pushes to `main` produce a `0.0.0+sha.<short>` artifact via
 `build.yml` (CI artifact only — not auto-installed).
 
-When cutting a release, promote the `[Unreleased]` block in
-[CHANGELOG.md](CHANGELOG.md) to `[<version>] - <YYYY-MM-DD>` and
-update the footer compare links in the same commit.
+When cutting a release, in the same commit: promote the
+`[Unreleased]` block in [CHANGELOG.md](CHANGELOG.md) to
+`[<version>] - <YYYY-MM-DD>`, update the footer compare links, and
+bump `project(... VERSION)` in `CMakeLists.txt` to match the tag. The
+packaged version comes from the tag; `project()` is only the fallback
+for a local build, so letting them drift makes a dev build lie about
+what it is.
 
 ## Licensing of contributions
 
