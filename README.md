@@ -44,6 +44,11 @@ What works end-to-end today:
 - Special Keys palette (`Ctrl+Alt+K`) for chords the local compositor
   swallows (PrintScreen, Super-key combos, …) plus paste-as-keystrokes
   for picky BIOS prompts.
+- **[Clipboard paste and text extraction](#clipboard-paste-and-text-extraction)**
+  — `Ctrl+Alt+Shift+V` types the host clipboard onto the target;
+  `Ctrl+Alt+Shift+C` drags out a region, extracts its text and puts it
+  back on the host clipboard. The two directions a KVM otherwise
+  can't cross.
 - Mass Storage upload / mount / eject / present-as-CDROM.
 - Target ATX power short-press, long-press (force-off), reset — each
   gated by a confirmation dialog.
@@ -55,9 +60,10 @@ What works end-to-end today:
 - `.deb` packaging built by GitHub Actions on tag push, linked against
   system Qt 6.4 from the noble apt archive (no bundled Qt).
 
-Deliberately out of scope for the 0.1.x line: clipboard sync, audio,
-macro keypad daemon. See [CHANGELOG.md](CHANGELOG.md) for the full
-list.
+Deliberately out of scope for the 0.1.x line: *continuous* clipboard
+sync (the two one-shot paths above are supported; a background
+bidirectional sync is not), audio, macro keypad daemon. See
+[CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## Install (from a release `.deb`)
 
@@ -138,11 +144,13 @@ QT_LOGGING_RULES='glasshouse.video.debug=true' \
 
 Default hotkeys (configurable per-PiKVM in YAML):
 
-| Hotkey | Action |
-|---|---|
-| `Ctrl+Alt+Shift+Backspace` | Release session-wide capture |
-| `F11`                   | Toggle fullscreen on this window |
-| `Ctrl+Alt+K`            | Show / hide Special Keys palette |
+| Hotkey | Config key | Action |
+|---|---|---|
+| `Ctrl+Alt+Shift+Backspace` | `release_hotkey` | Release session-wide capture |
+| `F11` | `fullscreen_hotkey` | Toggle fullscreen on this window |
+| `Ctrl+Alt+K` | `special_keys_hotkey` | Show / hide Special Keys palette |
+| `Ctrl+Alt+Shift+V` | `paste_hotkey` | [Type the host clipboard onto the target](#clipboard-paste-and-text-extraction) |
+| `Ctrl+Alt+Shift+C` | `region_hotkey` | [Extract text from a dragged region to the host clipboard](#clipboard-paste-and-text-extraction) |
 
 ## Prep on the PiKVMs
 
@@ -163,6 +171,72 @@ Default hotkeys (configurable per-PiKVM in YAML):
 No PiKVM firmware modifications are required. Glasshouse works against
 stock kvmd / ustreamer; cold-start quirks (encoder warmup, older-
 firmware pre-IDR 503s) are handled client-side.
+
+## Clipboard paste and text extraction
+
+A KVM gives you pixels in and keystrokes out, so the clipboard does not
+cross on its own. Two hotkeys bridge it, one in each direction. Both
+work while capture is held, and both report back on the window the
+pointer is over — which is not necessarily the one with keyboard
+focus.
+
+### Paste the host clipboard onto the target — `Ctrl+Alt+Shift+V`
+
+Types the host clipboard at the target as keystrokes, through the HID
+master's server-side keymap. No configuration needed.
+
+- **Text only.** The clipboard has to hold text; images and files are
+  ignored, and you get a status flash saying so.
+- **Characters the target keymap cannot produce are reported, not
+  silently dropped** — the flash reads `pasting 412 chars (3
+  unsupported dropped)…`.
+- **Press the hotkey again mid-paste to abort it.** A long paste shows
+  progress on the status bar. The abort is a second hotkey press rather
+  than a dialog because the video widget holds `grabMouse` /
+  `grabKeyboard` while captured, so a modal dialog raised over it
+  cannot be clicked or dismissed.
+
+Pastes are chunked at the server's per-request limit and posted strictly
+one at a time — see [CHANGELOG.md](CHANGELOG.md) for why posting them in
+parallel scrambled them.
+
+### Extract text from the target to the host clipboard — `Ctrl+Alt+Shift+C`
+
+Drag out a rectangle on the window under the cursor. The region is sent
+for text extraction and the result lands on your host clipboard — error
+messages, serial numbers, stack traces, anything you would otherwise
+retype by eye off a video stream.
+
+- A spinner shows the region size while the request is in flight.
+- **Press the hotkey again while it is spinning to abandon the
+  request**, rather than queueing a second one.
+- On success the flash reads `copied 128 chars to clipboard`; on
+  failure it names the error and stays up for eight seconds.
+
+This one needs a provider configured:
+
+```yaml
+ocr:
+  api_key: "secret://tui-api-key"   # required
+  # endpoint: "https://chat.kultivator.net.nz/v1/chat/completions"
+  # model: "auto"
+  # reasoning_effort: "none"        # transcription needs no reasoning
+  # max_tokens: 8000                # below this the model can return
+                                    # 200 with empty content
+  # timeout_ms: 60000
+  # prompt: "..."                   # default asks for verbatim text
+```
+
+`api_key` is a `secret://` reference resolved exactly like a PiKVM
+password (see [Configure secrets](#configure-secrets)). Everything else
+is optional and defaults to the values shown. The endpoint is
+OpenAI-compatible, so another provider that speaks the same
+`/v1/chat/completions` shape can be pointed at here.
+
+Without `ocr.api_key` the region hotkey still lets you drag out a
+selection, but nothing is extracted — the viewer logs `region capture
+will select but not extract` at startup. The paste hotkey is
+unaffected either way.
 
 ## MCP server
 
