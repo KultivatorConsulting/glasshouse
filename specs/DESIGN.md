@@ -1406,6 +1406,61 @@ detector takes images in and produces events out, so edge triggering, the
 cooldown, pointer suppression, the area ceiling, ring eviction and the
 poll cursor are all covered by `tests/test_watcher.cpp`.
 
+### 10.13 Transience and verdicts (verified 2026-10-14)
+
+Running a notification watcher for a day produced 31 firings, and a fair
+share of them were a browser tab switch rather than a notification. That
+is not a defect — §5 of HARNESS.md is explicit that the local detector is
+*allowed* to be trigger-happy because step 5 filters it — but step 5 had
+never been built, so nothing filtered anything and the 16 MB history
+filled with tab strips. Two halves were added.
+
+**The mechanical half: did the region go back?** A notification banner is
+drawn over whatever was underneath and then leaves, so the region reverts
+to its old content. A tab switch replaces the content and it stays
+replaced. On firing, the samples from the frame *before* the change are
+kept as a reference, and each later frame is compared against that
+reference rather than against its predecessor. Going quiet against the
+reference inside the window means `reverted`; running out of window means
+`persisted`. The reference costs a refcount, not a buffer, because
+`QByteArray` is copy-on-write.
+
+The window defaults to 30 s. Measured on a live watcher, an arriving
+banner and its dismissal were 3–7 s apart, with one pair 20 s apart.
+Being too short only mislabels a transient; it never loses an event.
+
+**This ranks, it must never suppress.** A dialog waiting to be answered
+does not revert. Neither does a build that failed and is still showing
+the error. Those are among the events a watcher is most wanted for, so
+`persisted` is not a synonym for uninteresting and the signal is kept
+well away from the firing decision.
+
+What it is actually for is retention. A transient's frames are the only
+record of it that will ever exist; a persistent change is still on the
+screen and can be re-read off the live stream with `glasshouse_screenshot`
+whenever you like. So when the ring is full, the persistent ones go
+first. `tests/test_watcher.cpp` pins this by failing when eviction falls
+back to oldest-first.
+
+**The judged half: `glasshouse_watcher_verdict`.** A consumer writes
+`relevant` or `spurious` back onto an event. `spurious` is not a label —
+it drops that event's retained frames immediately and hands the budget
+back, which is the only kind of pruning a ring understands. The event
+itself survives, because a few hundred bytes of "this was nothing" is
+worth keeping and the pictures are what cost. `relevant` does the
+opposite and protects the frames from eviction.
+
+The verdict doubles as the bookmark, which is why
+`.claude/skills/watcher-triage/SKILL.md` tells its reader not to keep a
+poll cursor: poll from 0, judge whatever is still `unjudged`, and an
+interrupted run self-heals.
+
+**Polling can outrun the verdict.** An event is delivered the instant it
+fires, so a consumer may well see it as `pending`. That is deliberate —
+delaying delivery by up to the revert window would defeat the point of
+detecting on every frame — and re-polling from a cursor just below that
+seq picks the resolved event up later. The tool description says so.
+
 ## 11. Risks and mitigations
 
 | Risk | Status | Mitigation |
@@ -1416,6 +1471,8 @@ poll cursor are all covered by `tests/test_watcher.cpp`.
 | HID master PiKVM fails | open | Manual failover (re-cable, update config). Auto-failover out of scope v1 |
 | Dock disconnect re-orders target monitors | open (detected indirectly) | A reordering is invisible to the client (§10.8); the resolution-mismatch warning is the nearest signal. Manual reassignment in config |
 | Target display settings change resolution | **resolved (detected)** | §10.8 — status-bar resolution readout plus an INFO/WARNING split on whether the mapping is actually affected |
+| Watcher history fills with false positives | **resolved (mitigated)** | §10.13 — persistent frames are evicted before transient ones, and a `spurious` verdict frees their bytes outright |
+| A transience signal used to suppress firings | open (by construction) | §10.13 — it ranks retention only; a dialog waiting for an answer never reverts, so suppressing on it would drop the most important events |
 | Clipboard text the target keymap can't type | **resolved (mitigated)** | §10.9 — common Unicode punctuation folded to ASCII, CRLF normalised, remainder dropped with a count shown; kvmd discards it silently otherwise |
 | Runaway clipboard paste into a live target | open (bounded) | §10.9 — chunks are sequenced so a second hotkey press aborts the remainder; what already reached the HID stays typed |
 | Tui API key leaking into config or logs | **resolved** | `ocr.api_key` is a `secret://` ref resolved via SecretResolver (env or `secrets.yaml`, 0600); the key is never logged |

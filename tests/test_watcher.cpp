@@ -14,6 +14,7 @@
 #include <QImage>
 #include <QElapsedTimer>
 #include <QPainter>
+#include <QDateTime>
 #include <QTest>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
@@ -97,6 +98,12 @@ int add(WatcherRegistry* reg, const QRect& rect, QString* error = nullptr,
 class TestWatcher : public QObject {
     Q_OBJECT
 private slots:
+    void aSpuriousVerdictHandsTheBudgetBack();
+    void judgingAnUnknownEventSaysSo();
+    void aTransientIsMarkedReverted();
+    void aPersistentChangeIsMarkedPersisted();
+    void aPendingVerdictIsVisibleAsPending();
+    void persistedFramesAreEvictedBeforeRevertedOnes();
     void aBgraVideoFrameIsReadInPlace();
     void aVideoFrameAndAnImageAgreeOnTheDelta();
     void createRejectsAnEmptyIntent();
@@ -608,6 +615,173 @@ void TestWatcher::aVideoFrameAndAnImageAgreeOnTheDelta() {
     QVERIFY2(qAbs(ef.first().delta - ei.first().delta) < 1.0,
              qPrintable(QStringLiteral("frame %1 vs image %2")
                             .arg(ef.first().delta).arg(ei.first().delta)));
+}
+
+void TestWatcher::aTransientIsMarkedReverted() {
+    // The motivating case: a notification banner is drawn over whatever
+    // was underneath and then leaves, so the region ends up exactly as it
+    // started. That is what separates it from a tab switch without any
+    // model being involved.
+    WatcherRegistry reg;
+    WatcherLimits lim = smallLimits();
+    lim.revertWindowMs = 300;
+    reg.setLimits(lim);
+
+    reg.ingestImage(0, flatFrame());
+    const QRect roi(100, 100, 80, 40);
+    const int id = add(&reg, roi);
+    QVERIFY(id > 0);
+    reg.ingestImage(0, flatFrame());               // baseline
+
+    reg.ingestImage(0, framePatched(roi, 220));    // the banner arrives
+    reg.ingestImage(0, framePatched(roi, 220));    // and sits there
+    reg.ingestImage(0, flatFrame());               // and goes again
+
+    qint64 cursor = 0;
+    const auto evs = reg.eventsSince(0, &cursor);
+    QVERIFY(!evs.isEmpty());
+    QCOMPARE(evs.first().transience, WatcherTransience::Reverted);
+    QVERIFY(evs.first().resolvedMs >= evs.first().wallMs);
+}
+
+void TestWatcher::aPersistentChangeIsMarkedPersisted() {
+    WatcherRegistry reg;
+    WatcherLimits lim = smallLimits();
+    lim.revertWindowMs = 200;
+    reg.setLimits(lim);
+
+    reg.ingestImage(0, flatFrame());
+    const QRect roi(100, 100, 80, 40);
+    const int id = add(&reg, roi);
+    QVERIFY(id > 0);
+    reg.ingestImage(0, flatFrame());               // baseline
+
+    reg.ingestImage(0, framePatched(roi, 220));    // changes, and stays
+    QTest::qWait(260);                             // past the window
+    reg.ingestImage(0, framePatched(roi, 220));
+
+    qint64 cursor = 0;
+    const auto evs = reg.eventsSince(0, &cursor);
+    QVERIFY(!evs.isEmpty());
+    QCOMPARE(evs.first().transience, WatcherTransience::Persisted);
+}
+
+void TestWatcher::aPendingVerdictIsVisibleAsPending() {
+    // A consumer may well poll before the region has had its chance to go
+    // back, and must be able to tell that apart from a verdict of
+    // persisted — otherwise it would judge on a result that is not in yet.
+    WatcherRegistry reg;
+    WatcherLimits lim = smallLimits();
+    lim.revertWindowMs = 60000;      // nothing is resolving during this test
+    reg.setLimits(lim);
+
+    reg.ingestImage(0, flatFrame());
+    const QRect roi(100, 100, 80, 40);
+    QVERIFY(add(&reg, roi) > 0);
+    reg.ingestImage(0, flatFrame());
+    reg.ingestImage(0, framePatched(roi, 220));
+
+    qint64 cursor = 0;
+    const auto evs = reg.eventsSince(0, &cursor);
+    QVERIFY(!evs.isEmpty());
+    QCOMPARE(evs.first().transience, WatcherTransience::Pending);
+}
+
+void TestWatcher::persistedFramesAreEvictedBeforeRevertedOnes() {
+    // The whole point of the signal: when the ring is full, throw away the
+    // frames of something still sitting on the screen rather than the only
+    // record of something that has gone.
+    WatcherRegistry reg;
+    WatcherLimits lim = smallLimits();
+    lim.revertWindowMs            = 120;
+    lim.minVolatileDepth          = 1;
+    lim.volatileBytesPerWatcher   = 80 * 40 * 3 * 5;    // about five crops
+    lim.volatilePoolBytes         = lim.volatileBytesPerWatcher * 2;
+    reg.setLimits(lim);
+
+    reg.ingestImage(0, flatFrame());
+    const QRect roi(100, 100, 80, 40);
+    const int id = add(&reg, roi, nullptr, WatcherTrigger::Change,
+                       /*wantVolatile=*/true, /*cooldownMs=*/1);
+    QVERIFY(id > 0);
+    reg.ingestImage(0, flatFrame());
+
+    // A transient: on, then off again, which resolves as reverted.
+    reg.ingestImage(0, framePatched(roi, 220));
+    reg.ingestImage(0, flatFrame());
+    QTest::qWait(10);
+    const qint64 transientEnd = QDateTime::currentMSecsSinceEpoch();
+
+    // Then several persistent changes, each one staying put long enough to
+    // be judged, until the ring has to start throwing things away.
+    for (int i = 0; i < 8; ++i) {
+        const int shade = 60 + i * 12;
+        reg.ingestImage(0, framePatched(roi, shade));
+        QTest::qWait(140);                     // past the revert window
+        reg.ingestImage(0, framePatched(roi, shade));
+    }
+
+    const auto kept = reg.frames(id, 0, 0, 0);
+    QVERIFY(!kept.isEmpty());
+    // Something from the transient survived the churn, which oldest-first
+    // eviction would have thrown away many frames ago.
+    int fromTransient = 0;
+    for (const auto& f : kept) {
+        if (f.wallMs <= transientEnd) ++fromTransient;
+    }
+    QVERIFY2(fromTransient > 0,
+             qPrintable(QStringLiteral("kept %1 frames, none from the "
+                                       "transient").arg(kept.size())));
+}
+
+void TestWatcher::aSpuriousVerdictHandsTheBudgetBack() {
+    WatcherRegistry reg;
+    WatcherLimits lim = smallLimits();
+    lim.minVolatileDepth = 1;
+    reg.setLimits(lim);
+
+    reg.ingestImage(0, flatFrame());
+    const QRect roi(100, 100, 80, 40);
+    const int id = add(&reg, roi, nullptr, WatcherTrigger::Change,
+                       /*wantVolatile=*/true, /*cooldownMs=*/1);
+    QVERIFY(id > 0);
+    reg.ingestImage(0, flatFrame());
+
+    // Two changes, so there is more than one frame to drop and the ring
+    // still has its newest to keep.
+    reg.ingestImage(0, framePatched(roi, 200));
+    reg.ingestImage(0, framePatched(roi, 90));
+    reg.ingestImage(0, framePatched(roi, 210));
+
+    qint64 cursor = 0;
+    const auto evs = reg.eventsSince(0, &cursor);
+    QVERIFY(!evs.isEmpty());
+
+    const qint64 before = reg.stats(id).ringBytes;
+    const qint64 freed  = reg.judge(evs.first().seq, WatcherVerdict::Spurious,
+                                    QStringLiteral("a tab switch"));
+    QVERIFY(freed > 0);
+    QCOMPARE(reg.stats(id).ringBytes, before - freed);
+
+    // The event itself survives, carrying the verdict — a few hundred
+    // bytes of "this was nothing" is worth keeping; the pictures are what
+    // cost.
+    qint64 c2 = 0;
+    const auto after = reg.eventsSince(0, &c2);
+    bool found = false;
+    for (const auto& e : after) {
+        if (e.seq != evs.first().seq) continue;
+        found = true;
+        QCOMPARE(e.verdict, WatcherVerdict::Spurious);
+        QCOMPARE(e.verdictNote, QStringLiteral("a tab switch"));
+    }
+    QVERIFY(found);
+}
+
+void TestWatcher::judgingAnUnknownEventSaysSo() {
+    WatcherRegistry reg;
+    reg.setLimits(smallLimits());
+    QCOMPARE(reg.judge(999, WatcherVerdict::Spurious, QString()), qint64(-1));
 }
 
 QTEST_MAIN(TestWatcher)

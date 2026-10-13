@@ -150,6 +150,12 @@ struct WatchSpec {
     int  history_bytes_per_watcher = 16 * 1024 * 1024;
     int  history_pool_bytes        = 96 * 1024 * 1024;
     int  min_history_frames        = 30;   // sets the volatile area ceiling
+    // How long an event waits to find out whether its region went back to
+    // what it was. Measured on a live notification watcher, banners and
+    // their dismissals were 3-7 s apart with one pair 20 s apart, so the
+    // default is deliberately generous: too short only mislabels a
+    // transient as persistent, it never loses an event.
+    int  revert_window_ms          = 30000;
 };
 
 // Custom chord entry for the special-keys palette / future macro-pad

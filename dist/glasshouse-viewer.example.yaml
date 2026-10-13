@@ -163,6 +163,13 @@ watchers:
   # history: 16 MB / 30 frames / 3 bytes a pixel is about 186,000 px,
   # roughly 500x350. Above it, history is refused rather than degraded.
   min_history_frames: 30
+  # How long an event waits to find out whether the region went back to
+  # what it was before it fired. A notification is drawn over whatever
+  # was underneath and then leaves, so the region reverts; a tab switch
+  # replaces the content and it stays replaced. The viewer uses that to
+  # decide what to throw away first when the history is full, and a
+  # consumer can judge on it. It never suppresses a firing.
+  # revert_window_ms: 30000
 
 # Local MCP server (DESIGN.md §10.11). Exposes the running session to any
 # MCP client: screen indexes, the combined desktop, screenshots, typing,

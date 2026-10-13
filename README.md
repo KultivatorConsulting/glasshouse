@@ -448,6 +448,37 @@ The local detector is meant to be a little trigger-happy, because
 whatever reads the event is what decides whether the thing actually
 happened.
 
+### Telling a notification from a tab switch
+
+A pixel comparison cannot do it — a banner and a browser tab switch move
+the same pixels. But there is one difference that *is* mechanical, and
+every event carries it:
+
+| `transience` | what it means |
+|---|---|
+| `reverted` | The region went back to the content it had before. Something appeared and then left — the shape of a notification. |
+| `persisted` | It changed and stayed changed. |
+| `pending` | Not resolved yet. Poll again from a cursor just below that event's `seq`. |
+
+> **`persisted` does not mean uninteresting.** A dialog waiting to be
+> answered persists. So does a build that failed and is still showing
+> the error. This signal only ever *ranks*; it never suppresses a
+> firing, and it should not be read as a reason to ignore something.
+
+What it is really for is deciding what to throw away. A transient's
+frames are the only record it ever happened; a persistent change is
+still on the screen and can be re-read with `glasshouse_screenshot` any
+time. So when the 16 MB history fills, the persistent frames go first.
+
+**And you can tell it outright.** `glasshouse_watcher_verdict` writes
+`relevant` or `spurious` back onto an event. A `spurious` verdict is not
+just a label: it drops that event's frames immediately and hands the
+budget back, which is what keeps a busy watcher's history worth reading.
+The event itself stays, because the pictures are what cost. The bundled
+`watcher-triage` skill does this in a loop — and since the verdict is
+stored on the event, it needs no cursor at all: poll from `0`, judge
+whatever is still `unjudged`.
+
 ## MCP server
 
 Glasshouse can expose the running session over
@@ -501,6 +532,7 @@ stream — a `GET` returns 405 — so clients poll rather than subscribe.
 | `glasshouse_watcher_list` | Every watcher, with fire counts and how much history it holds. |
 | `glasshouse_watcher_poll` | Events since a cursor, plus the next cursor. The only delivery path. |
 | `glasshouse_watcher_frames` | A watcher's retained crops, tiled into a filmstrip or returned as stills. |
+| `glasshouse_watcher_verdict` | Marks events `relevant` or `spurious`; spurious frees their frames. |
 | `glasshouse_watcher_delete` | Removes a watcher and drops its history. |
 
 Coordinates can be screen-relative (`screen` plus `x`/`y`) or

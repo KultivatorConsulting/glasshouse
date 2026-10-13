@@ -67,6 +67,7 @@ ConfigResult loadWith(QTemporaryDir& dir, const QString& extra) {
 class TestConfig : public QObject {
     Q_OBJECT
 private slots:
+    void watchersRejectANegativeRevertWindow();
     void validConfigAccepts();
     void monitorWindowCountMismatchRejects();
     void unknownWindowTargetMonitorRejects();
@@ -263,6 +264,17 @@ void TestConfig::watchersDefaultOnWithTheDesignedBudgets() {
     QCOMPARE(r.config->watchers.max, 10);
     QCOMPARE(r.config->watchers.threshold, 12);
     QCOMPARE(r.config->watchers.min_history_frames, 30);
+    QCOMPARE(r.config->watchers.revert_window_ms, 30000);
+}
+
+void TestConfig::watchersRejectANegativeRevertWindow() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto r = loadWith(dir, QStringLiteral(
+        "watchers:\n"
+        "  revert_window_ms: -1\n"));
+    QVERIFY(!r.errors.isEmpty());
+    QVERIFY(anyErrorContains(r.errors, QStringLiteral("revert_window_ms")));
 }
 
 void TestConfig::watchersParseTheirBlock() {

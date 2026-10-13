@@ -482,6 +482,7 @@ int main(int argc, char** argv) {
         lim.volatileBytesPerWatcher = cfg.watchers.history_bytes_per_watcher;
         lim.volatilePoolBytes       = cfg.watchers.history_pool_bytes;
         lim.minVolatileDepth        = cfg.watchers.min_history_frames;
+        lim.revertWindowMs          = cfg.watchers.revert_window_ms;
         watchers->setLimits(lim);
         qCInfo(lcWatch).nospace()
             << "watchers enabled: up to " << lim.maxWatchers

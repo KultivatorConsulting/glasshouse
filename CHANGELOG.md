@@ -75,6 +75,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     works and the viewer keeps no subscriber list.
   - Budgets and the hotkey are configurable under `watchers:` in
     config.yaml. See DESIGN.md §10.12 and HARNESS.md §5.
+  - Every event carries a **`transience`**: `reverted` means the region
+    went back to its pre-event content, so something appeared and then
+    left — the shape of a notification — while `persisted` means it is
+    still on screen. The comparison is against the frame from before
+    the firing rather than the previous one, over a 30 s window
+    (`watchers.revert_window_ms`). It ranks retention and never
+    suppresses a firing: a dialog waiting to be answered does not
+    revert either, and those are events a watcher exists to catch.
+    When the ring is full, persistent frames are evicted before
+    transient ones, because a transient's frames are the only record
+    there will ever be.
+  - **`glasshouse_watcher_verdict`** lets a consumer write `relevant`
+    or `spurious` back onto an event — HARNESS.md §5's judging step,
+    which had never been built. `spurious` drops that event's retained
+    frames at once and hands the budget back; the event survives,
+    carrying the verdict and an optional note. A bundled
+    `watcher-triage` skill drives it, and needs no poll cursor because
+    the verdict is itself the bookmark.
   - Detection samples the mapped frame in place, including the packed
     BGRA both pipelines actually emit. Verified live on a two-head
     session: a single 42×22 watcher adds no measurable CPU, where an

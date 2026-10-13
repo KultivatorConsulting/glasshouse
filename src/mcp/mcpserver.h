@@ -106,6 +106,7 @@ private:
     void toolWatcherPoll(const QJsonObject& args, Done done);
     void toolWatcherFrames(const QJsonObject& args, Done done);
     void toolWatcherDelete(const QJsonObject& args, Done done);
+    void toolWatcherVerdict(const QJsonObject& args, Done done);
 
     // Resolve the registry or explain why there isn't one.
     WatcherRegistry* watchersOrError(QString* error) const;

@@ -188,6 +188,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& args,
     else if (name == QLatin1String("glasshouse_watcher_poll"))   toolWatcherPoll(args, std::move(done));
     else if (name == QLatin1String("glasshouse_watcher_frames")) toolWatcherFrames(args, std::move(done));
     else if (name == QLatin1String("glasshouse_watcher_delete")) toolWatcherDelete(args, std::move(done));
+    else if (name == QLatin1String("glasshouse_watcher_verdict")) toolWatcherVerdict(args, std::move(done));
     else done({}, QStringLiteral("unknown tool: %1").arg(name));
 }
 
@@ -711,7 +712,12 @@ void McpServer::toolWatcherPoll(const QJsonObject& args, Done done) {
             {"rect", QJsonObject{{"x", ev.rect.x()}, {"y", ev.rect.y()},
                                  {"w", ev.rect.width()},
                                  {"h", ev.rect.height()}}},
+            {"transience", watcherTransienceName(ev.transience)},
+            {"verdict", watcherVerdictName(ev.verdict)},
         };
+        if (!ev.verdictNote.isEmpty()) {
+            o.insert(QStringLiteral("verdict_note"), ev.verdictNote);
+        }
         if (wantImages && attached < maxImages && !ev.crop.isNull()) {
             const QJsonObject img = pngContent(ev.crop);
             if (!img.isEmpty()) {
@@ -791,8 +797,12 @@ void McpServer::toolWatcherFrames(const QJsonObject& args, Done done) {
     QJsonArray content;
     QJsonArray listed;
     for (const auto& f : frames) {
-        listed.append(QJsonObject{{"at", isoOf(f.wallMs)},
-                                  {"delta", f.delta}});
+        listed.append(QJsonObject{
+            {"at", isoOf(f.wallMs)},
+            {"delta", f.delta},
+            {"event", double(f.eventSeq)},
+            {"transience", watcherTransienceName(f.transience)},
+            {"verdict", watcherVerdictName(f.verdict)}});
     }
 
     if (stills) {
@@ -859,6 +869,63 @@ void McpServer::toolWatcherDelete(const QJsonObject& args, Done done) {
     }
     emit toolActivity(QStringLiteral("MCP: watcher %1 removed").arg(id));
     done(textContent(QStringLiteral("watcher %1 removed").arg(id)), {});
+}
+
+void McpServer::toolWatcherVerdict(const QJsonObject& args, Done done) {
+    QString error;
+    WatcherRegistry* reg = watchersOrError(&error);
+    if (!reg) { done({}, error); return; }
+
+    WatcherVerdict v = WatcherVerdict::Unjudged;
+    if (!parseWatcherVerdict(args.value(QStringLiteral("verdict")).toString(),
+                             &v, &error)) {
+        done({}, error);
+        return;
+    }
+    if (v == WatcherVerdict::Unjudged) {
+        done({}, QStringLiteral("verdict is required: relevant or spurious"));
+        return;
+    }
+    const QString note = args.value(QStringLiteral("note")).toString();
+
+    QList<qint64> seqs;
+    const QJsonValue sv = args.value(QStringLiteral("seq"));
+    if (sv.isArray()) {
+        for (const auto& e : sv.toArray()) seqs.append(qint64(e.toDouble()));
+    } else if (sv.isDouble()) {
+        seqs.append(qint64(sv.toDouble()));
+    }
+    if (seqs.isEmpty()) {
+        done({}, QStringLiteral("seq is required: one event seq, or an array "
+                                "of them, as glasshouse_watcher_poll reports"));
+        return;
+    }
+
+    qint64 freed = 0;
+    QList<qint64> unknown;
+    int judged = 0;
+    for (qint64 seq : seqs) {
+        const qint64 f = reg->judge(seq, v, note);
+        if (f < 0) { unknown.append(seq); continue; }
+        freed += f;
+        judged++;
+    }
+
+    QString msg = QStringLiteral("judged %1 event(s) %2")
+                      .arg(judged)
+                      .arg(watcherVerdictName(v));
+    if (freed > 0) {
+        msg += QStringLiteral(", freeing %1 KB of history").arg(freed / 1024);
+    }
+    if (!unknown.isEmpty()) {
+        QStringList u;
+        for (qint64 q : unknown) u << QString::number(q);
+        msg += QStringLiteral(". No such event: %1 — the event log keeps the "
+                              "last 500 firings, so an old seq may have "
+                              "aged out").arg(u.join(QStringLiteral(", ")));
+    }
+    emit toolActivity(QStringLiteral("MCP: %1").arg(msg));
+    done(textContent(msg), {});
 }
 
 QJsonArray McpServer::toolSchemas() const {
@@ -1070,7 +1137,14 @@ QJsonArray McpServer::toolSchemas() const {
          "delivered — the viewer never pushes — so poll it on whatever "
          "interval suits; every 10-30 s is ample, because the history "
          "buffer is what stops anything being missed, not the poll rate. "
-         "Pass 0 (or omit) the first time to drain whatever is buffered."},
+         "Pass 0 (or omit) the first time to drain whatever is buffered. "
+         "Each event carries a `transience`: `reverted` means the region "
+         "went back to its pre-event content, so something appeared and "
+         "then left — the shape of a notification; `persisted` means it is "
+         "still on screen; `pending` means the verdict is not in yet, and "
+         "polling again from a cursor just below that seq will pick it up "
+         "once it is. Judge events with glasshouse_watcher_verdict so the "
+         "spurious ones stop eating the history budget."},
         {"inputSchema", obj({
             {"cursor", integer("The next_cursor from your previous poll. "
                                "Omit or 0 to get everything buffered.")},
@@ -1102,6 +1176,40 @@ QJsonArray McpServer::toolSchemas() const {
                               "filmstrip, 4 for stills.")},
             {"cols", integer("filmstrip only: tiles per row. Default 4.")},
         }, {"id"})}});
+
+    tools.append(QJsonObject{
+        {"name", "glasshouse_watcher_verdict"},
+        {"description",
+         "Record what an event actually turned out to be, so the viewer can "
+         "act on it. The local detector is deliberately trigger-happy — it "
+         "compares pixels and cannot tell a notification from a tab switch "
+         "— and this is the other half of that bargain. A `spurious` "
+         "verdict drops that event's retained frames immediately and hands "
+         "the budget back, which is how a busy watcher's history is kept "
+         "worth reading; `relevant` protects them from eviction instead. "
+         "Judge on the event's `transience` and its crop, not on delta "
+         "alone: `reverted` means the region went back to what it was, so "
+         "something appeared and left, which is the shape of a "
+         "notification; `persisted` means it is still on screen, which "
+         "covers both a tab switch and a dialog waiting to be answered — "
+         "so persisted is never on its own a reason to call something "
+         "spurious."},
+        {"inputSchema", obj({
+            {"seq", QJsonObject{{"type", "array"},
+                {"items", QJsonObject{{"type", "integer"}}},
+                {"description",
+                 "Event seq numbers from glasshouse_watcher_poll. A single "
+                 "integer is accepted too. Judging several at once is the "
+                 "normal case."}}},
+            {"verdict", QJsonObject{{"type", "string"},
+                {"enum", QJsonArray{"relevant", "spurious"}},
+                {"description",
+                 "relevant keeps the event's frames; spurious drops them."}}},
+            {"note", QJsonObject{{"type", "string"},
+                {"description",
+                 "Optional one line on why, carried on the event for "
+                 "whoever reads it next."}}},
+        })}});
 
     tools.append(QJsonObject{
         {"name", "glasshouse_watcher_delete"},

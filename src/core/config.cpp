@@ -149,6 +149,13 @@ QStringList validateConfig(const Config& cfg) {
                 "watchers.threshold is %1; it is a mean absolute luma "
                 "difference and must be 1-255").arg(cfg.watchers.threshold));
         }
+        if (cfg.watchers.revert_window_ms < 0) {
+            errors << QStringLiteral(
+                "watchers.revert_window_ms is %1; it cannot be negative. 0 "
+                "resolves every event as persisted on the next frame, which "
+                "turns the signal off without turning the watcher off.")
+                .arg(cfg.watchers.revert_window_ms);
+        }
         if (cfg.watchers.min_history_frames < 1) {
             errors.append(QStringLiteral(
                 "watchers.min_history_frames is %1; it must be at least 1 "
@@ -388,6 +395,8 @@ ConfigResult loadConfig(const QString& path) {
             w, "history_pool_bytes", d.history_pool_bytes);
         cfg.watchers.min_history_frames = yamlScalarOr<int>(
             w, "min_history_frames", d.min_history_frames);
+        cfg.watchers.revert_window_ms = yamlScalarOr<int>(
+            w, "revert_window_ms", d.revert_window_ms);
     }
 
     // windows

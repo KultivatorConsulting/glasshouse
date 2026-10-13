@@ -76,6 +76,41 @@ QString watcherOriginName(WatcherOrigin o) {
                                       : QStringLiteral("described");
 }
 
+QString watcherTransienceName(WatcherTransience t) {
+    switch (t) {
+        case WatcherTransience::Reverted:  return QStringLiteral("reverted");
+        case WatcherTransience::Persisted: return QStringLiteral("persisted");
+        case WatcherTransience::Pending:   break;
+    }
+    return QStringLiteral("pending");
+}
+
+QString watcherVerdictName(WatcherVerdict v) {
+    switch (v) {
+        case WatcherVerdict::Relevant: return QStringLiteral("relevant");
+        case WatcherVerdict::Spurious: return QStringLiteral("spurious");
+        case WatcherVerdict::Unjudged: break;
+    }
+    return QStringLiteral("unjudged");
+}
+
+bool parseWatcherVerdict(const QString& name, WatcherVerdict* out,
+                         QString* error) {
+    const QString n = name.trimmed().toLower();
+    if (n == QLatin1String("relevant")) { *out = WatcherVerdict::Relevant; return true; }
+    if (n == QLatin1String("spurious")) { *out = WatcherVerdict::Spurious; return true; }
+    if (n == QLatin1String("unjudged") || n.isEmpty()) {
+        *out = WatcherVerdict::Unjudged;
+        return true;
+    }
+    if (error) {
+        *error = QStringLiteral("unknown verdict \"%1\": use relevant, "
+                                "spurious or unjudged").arg(name);
+    }
+    return false;
+}
+
+
 WatcherRegistry::WatcherRegistry(QObject* parent) : QObject(parent) {}
 
 void WatcherRegistry::setFrameSize(int screen, const QSize& size) {
@@ -433,6 +468,35 @@ void WatcherRegistry::ingestFrame(int screen, const QVideoFrame& frame) {
     ingestImage(screen, img);
 }
 
+double WatcherRegistry::meanAbsDelta(const QByteArray& a,
+                                    const QByteArray& b) {
+    const int n = a.size();
+    if (n <= 0 || b.size() != n) return 0.0;
+    const uchar* p = reinterpret_cast<const uchar*>(a.constData());
+    const uchar* q = reinterpret_cast<const uchar*>(b.constData());
+    qint64 sum = 0;
+    for (int i = 0; i < n; ++i) sum += std::abs(int(p[i]) - int(q[i]));
+    return double(sum) / double(n);
+}
+
+void WatcherRegistry::resolveTransience(State& st, qint64 seq,
+                                        WatcherTransience t, qint64 now) {
+    if (seq <= 0) return;
+    for (auto& ev : m_events) {
+        if (ev.seq != seq) continue;
+        ev.transience = t;
+        ev.resolvedMs = now;
+        break;
+    }
+    // The same verdict onto the frames, so eviction reads it directly.
+    for (auto& f : st.ring) {
+        if (f.eventSeq == seq) f.transience = t;
+    }
+    qCDebug(lcWatch).nospace()
+        << "watcher " << st.def.id << " event " << seq << " "
+        << watcherTransienceName(t);
+}
+
 void WatcherRegistry::detect(int screen, const PixelView& view,
                              const std::function<QImage()>& colour) {
     const qint64 now = nowMs();
@@ -460,14 +524,12 @@ void WatcherRegistry::detect(int screen, const PixelView& view,
             continue;
         }
 
-        const uchar* a = reinterpret_cast<const uchar*>(st.prevLuma.constData());
-        const uchar* b = reinterpret_cast<const uchar*>(cur.constData());
-        qint64 sum = 0;
-        for (int i = 0; i < n; ++i) {
-            sum += std::abs(int(a[i]) - int(b[i]));
-        }
-        const double delta = double(sum) / double(n);
-        st.prevLuma = cur;
+        const double delta = meanAbsDelta(st.prevLuma, cur);
+        // Copy-on-write, so this is a refcount and not a buffer. It is the
+        // pre-change reference that a firing on this frame will want, and
+        // it has to be taken before prevLuma is moved on.
+        const QByteArray prevSamples = st.prevLuma;
+        st.prevLuma  = cur;
         st.lastDelta = delta;
 
         // HARNESS.md §5.2: the target's own cursor is captured over HDMI,
@@ -480,6 +542,26 @@ void WatcherRegistry::detect(int screen, const PixelView& view,
                 st.def.rect.adjusted(-kPointerMarginPx, -kPointerMarginPx,
                                      kPointerMarginPx, kPointerMarginPx);
             if (guard.contains(*ptr)) st.suppressed = true;
+        }
+
+        // Does an event that already fired now read as a transient? The
+        // comparison is against the content from before it fired, not
+        // against the previous frame: a banner that comes and goes leaves
+        // the region exactly as it found it. While the target's own cursor
+        // is inside, the comparison is polluted, so only the timeout runs.
+        if (st.pendingSeq != 0) {
+            if (!st.suppressed && st.preLuma.size() == cur.size() &&
+                meanAbsDelta(st.preLuma, cur) < st.def.threshold) {
+                resolveTransience(st, st.pendingSeq,
+                                  WatcherTransience::Reverted, now);
+                st.pendingSeq = 0;
+                st.preLuma.clear();
+            } else if (now >= st.pendingUntilMs) {
+                resolveTransience(st, st.pendingSeq,
+                                  WatcherTransience::Persisted, now);
+                st.pendingSeq = 0;
+                st.preLuma.clear();
+            }
         }
 
         const bool changing = delta >= st.def.threshold;
@@ -566,6 +648,23 @@ void WatcherRegistry::detect(int screen, const PixelView& view,
         m_events.append(ev);
         while (m_events.size() > kEventCap) m_events.removeFirst();
 
+        // This firing takes over the pending slot. If one was still open,
+        // the region moved again rather than settling back, which is what
+        // persisting means.
+        if (st.pendingSeq != 0) {
+            resolveTransience(st, st.pendingSeq,
+                              WatcherTransience::Persisted, now);
+        }
+        st.pendingSeq     = ev.seq;
+        st.preLuma        = prevSamples;
+        st.pendingUntilMs = now + m_limits.revertWindowMs;
+        // A frame retained earlier on this same tick belongs to this
+        // event, not to the one before it.
+        if (!st.ring.isEmpty() && st.ring.last().wallMs == now) {
+            st.ring.last().eventSeq   = ev.seq;
+            st.ring.last().transience = WatcherTransience::Pending;
+        }
+
         if (st.def.trigger == WatcherTrigger::Change) {
             qCInfo(lcWatch).nospace()
                 << "watcher " << st.def.id << " fired (change: delta "
@@ -598,14 +697,14 @@ void WatcherRegistry::retain(State& st, const QImage& crop, qint64 wallMs,
                    ? crop
                    : crop.convertToFormat(QImage::Format_RGB888);
     if (f.crop.isNull()) return;
+    f.eventSeq = st.pendingSeq;
 
     st.ring.append(f);
     st.ringBytes += f.crop.sizeInBytes();
 
     while (st.ring.size() > 1 &&
            st.ringBytes > m_limits.volatileBytesPerWatcher) {
-        st.ringBytes -= st.ring.first().crop.sizeInBytes();
-        st.ring.removeFirst();
+        evictOneFrom(st);
     }
     if (poolBytes() > m_limits.volatilePoolBytes) evictGlobal();
 }
@@ -614,6 +713,65 @@ qint64 WatcherRegistry::poolBytes() const {
     qint64 total = 0;
     for (const auto& st : m_watchers) total += st.ringBytes;
     return total;
+}
+
+qint64 WatcherRegistry::judge(qint64 seq, WatcherVerdict v,
+                              const QString& note) {
+    WatcherEvent* ev = nullptr;
+    for (auto& e : m_events) {
+        if (e.seq == seq) { ev = &e; break; }
+    }
+    if (!ev) return -1;
+
+    ev->verdict     = v;
+    ev->verdictNote = note;
+
+    auto it = m_watchers.find(ev->id);
+    if (it == m_watchers.end()) return 0;
+    State& st = *it;
+
+    qint64 freed = 0;
+    if (v == WatcherVerdict::Spurious) {
+        // Hand the budget back now rather than waiting for eviction to
+        // reach these. The newest frame always stays, so a watcher is
+        // never left with nothing to show.
+        for (int i = st.ring.size() - 2; i >= 0; --i) {
+            if (st.ring.at(i).eventSeq != seq) continue;
+            freed += st.ring.at(i).crop.sizeInBytes();
+            st.ringBytes -= st.ring.at(i).crop.sizeInBytes();
+            st.ring.removeAt(i);
+        }
+    } else {
+        for (auto& f : st.ring) {
+            if (f.eventSeq == seq) f.verdict = v;
+        }
+    }
+
+    qCInfo(lcWatch).nospace()
+        << "watcher " << ev->id << " event " << seq << " judged "
+        << watcherVerdictName(v)
+        << (freed > 0 ? QStringLiteral(", freed %1 KB").arg(freed / 1024)
+                      : QString())
+        << (note.isEmpty() ? QString() : QStringLiteral(": ") + note);
+    return freed;
+}
+
+void WatcherRegistry::evictOneFrom(State& st) {
+    // Drop a frame whose event persisted before one whose event reverted.
+    // A persistent change is still on the screen and can be re-read off
+    // the live stream whenever you like; a transient's frames are the only
+    // record of it there will ever be. The ring is in time order, so the
+    // first match is also the oldest. The newest frame is never dropped.
+    if (st.ring.size() <= 1) return;
+    int victim = -1;
+    for (int i = 0; i < st.ring.size() - 1; ++i) {
+        const auto& f = st.ring.at(i);
+        if (f.verdict == WatcherVerdict::Relevant) continue;   // judged worth keeping
+        if (f.transience == WatcherTransience::Persisted) { victim = i; break; }
+    }
+    if (victim < 0) victim = 0;    // nothing ranked: oldest, as before
+    st.ringBytes -= st.ring.at(victim).crop.sizeInBytes();
+    st.ring.removeAt(victim);
 }
 
 void WatcherRegistry::evictGlobal() {
@@ -629,9 +787,7 @@ void WatcherRegistry::evictGlobal() {
             if (victim == 0 || t < oldest) { victim = it.key(); oldest = t; }
         }
         if (victim == 0) break;    // nothing left that is safe to drop
-        State& st = m_watchers[victim];
-        st.ringBytes -= st.ring.first().crop.sizeInBytes();
-        st.ring.removeFirst();
+        evictOneFrom(m_watchers[victim]);
     }
 }
 
