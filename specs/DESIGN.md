@@ -1328,13 +1328,25 @@ there goes quiet again — where a baseline comparison would stay above
 threshold for as long as the badge was visible and fire on every frame.
 It also means one buffer per watcher rather than two.
 
-Luma only, and read from the decoder's own plane: the frames arrive as
-planar YUV (NV12 from VA-API, I420 from the software paths), so the hot
-path maps the frame and reads plane 0 for the watched rectangle, never
-converting a full frame. A colour crop is produced only for a frame worth
-keeping or an event worth reporting, which is a handful per event rather
-than ~27 a second. Anything that is not a luma-plane format falls back to
-`toImage()`, which is correct everywhere and costs a conversion per frame.
+Luma only, and read straight out of the mapped frame: the hot path maps
+the frame and samples just the watched rectangle, never converting a full
+one. A colour crop is produced only for a frame worth keeping or an event
+worth reporting, which is a handful per event rather than ~27 a second.
+Anything with no in-place reader falls back to `toImage()`, which is
+correct everywhere and costs a conversion per frame.
+
+**What the pipeline hands over is decided here, not by the decoder.** The
+first version of that switch handled only planar YUV, on the reasonable-
+sounding assumption that a decoder yields NV12 or I420. It does not reach
+the watcher that way: `mjpegpipeline` and `videopipeline` both end in
+`videoconvert ! video/x-raw,format=BGRA` before their appsink, so every
+frame is packed `Format_BGRA8888` — which was not in the switch, so every
+frame took the fallback. Measured on a live two-head session, one 42x22
+watcher cost about +46% of a core (≈64% idle → ≈110%); reading the BGRA
+bytes in place removes it. Two lessons are baked in: the registry counts
+`slowPathFrames()` so a test can tell the paths apart, and the chosen path
+is logged once per screen, because the fallback previously logged nothing
+and the only visible symptom was CPU.
 
 Sampling uses a stride that keeps any rectangle under 65,536 samples, so
 a careless full-screen watcher costs about what a tray-badge one does.

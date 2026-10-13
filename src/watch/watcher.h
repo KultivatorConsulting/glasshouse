@@ -7,6 +7,7 @@
 #include <QObject>
 #include <QPoint>
 #include <QRect>
+#include <QSet>
 #include <QSize>
 #include <QString>
 
@@ -157,6 +158,12 @@ public:
     QList<WatcherEvent> eventsSince(qint64 cursor, qint64* nextCursor) const;
     qint64              cursor() const { return m_seq; }
 
+    // Test seam: frames that took the whole-frame conversion rather than
+    // being read in place. Both paths produce identical events, so this is
+    // the only way a test can tell them apart — and a dead in-place branch
+    // shipped once already because nothing could see which one ran.
+    qint64              slowPathFrames() const { return m_slowPathFrames; }
+
     // Retained frames for one watcher, within [fromMs, toMs] when either is
     // non-zero, newest-last. `limit` 0 means all of them.
     QList<WatcherFrame> frames(int id, qint64 fromMs, qint64 toMs,
@@ -255,6 +262,8 @@ private:
     QList<int>            m_order;        // creation order, for list()
     QHash<int, QSize>     m_frameSizes;
     QHash<int, QPoint>    m_pointers;
+    QSet<int>             m_pathLogged;   // one line per screen, not per frame
+    qint64                m_slowPathFrames = 0;
     QList<WatcherEvent>   m_events;
     qint64                m_seq     = 0;
     int                   m_nextId  = 1;

@@ -15,6 +15,9 @@
 #include <QElapsedTimer>
 #include <QPainter>
 #include <QTest>
+#include <QVideoFrame>
+#include <QVideoFrameFormat>
+#include <cstring>
 
 using namespace glasshouse;
 
@@ -38,6 +41,23 @@ QImage framePatched(const QRect& rect, int grey, int base = 40) {
     p.fillRect(rect, QColor(grey, grey, grey));
     p.end();
     return img;
+}
+
+// A QImage wrapped as the packed-BGRA QVideoFrame that Glasshouse's own
+// pipelines actually produce — both of them end in
+// `videoconvert ! video/x-raw,format=BGRA`. QImage::Format_ARGB32 is a
+// word value, so on little-endian its bytes are already B,G,R,A.
+QVideoFrame bgraFrame(const QImage& src) {
+    const QImage img = src.convertToFormat(QImage::Format_ARGB32);
+    QVideoFrame f(QVideoFrameFormat(img.size(),
+                                    QVideoFrameFormat::Format_BGRA8888));
+    if (!f.map(QVideoFrame::WriteOnly)) return QVideoFrame();
+    for (int y = 0; y < img.height(); ++y) {
+        std::memcpy(f.bits(0) + qsizetype(y) * f.bytesPerLine(0),
+                    img.constScanLine(y), size_t(img.width()) * 4);
+    }
+    f.unmap();
+    return f;
 }
 
 // Tight budgets so eviction is reachable without allocating 96 MB.
@@ -77,6 +97,8 @@ int add(WatcherRegistry* reg, const QRect& rect, QString* error = nullptr,
 class TestWatcher : public QObject {
     Q_OBJECT
 private slots:
+    void aBgraVideoFrameIsReadInPlace();
+    void aVideoFrameAndAnImageAgreeOnTheDelta();
     void createRejectsAnEmptyIntent();
     void createRejectsARectOutsideTheFrame();
     void createRejectsPastTheWatcherLimit();
@@ -531,6 +553,61 @@ void TestWatcher::theFilmstripTilesEveryFrame() {
     QVERIFY(narrow.height() > strip.height());
 
     QVERIFY(WatcherRegistry::filmstrip({}, 3, 0).isNull());
+}
+
+void TestWatcher::aBgraVideoFrameIsReadInPlace() {
+    // The regression this pins: ingestFrame's format switch once listed
+    // only planar YUV, so the packed BGRA our pipelines emit fell through
+    // to a whole-frame toImage() plus a whole-frame greyscale conversion
+    // on every frame — about +46% of a core for one small watcher, with
+    // nothing in the log to say so. Every other test here drives
+    // ingestImage, which is why it went unnoticed.
+    WatcherRegistry reg;
+    reg.setLimits(smallLimits());
+
+    const QRect roi(100, 100, 80, 60);
+    reg.ingestFrame(0, bgraFrame(flatFrame()));
+    const int id = add(&reg, roi);
+    QVERIFY(id > 0);
+
+    reg.ingestFrame(0, bgraFrame(flatFrame()));           // baseline
+    reg.ingestFrame(0, bgraFrame(framePatched(roi, 220)));
+
+    qint64 cursor = 0;
+    QCOMPARE(reg.eventsSince(0, &cursor).size(), 1);
+    QCOMPARE(reg.slowPathFrames(), qint64(0));
+}
+
+void TestWatcher::aVideoFrameAndAnImageAgreeOnTheDelta() {
+    // The in-place reader and the conversion fallback must measure the
+    // same change, or a threshold tuned on one path is wrong on the other.
+    const QRect roi(100, 100, 80, 60);
+
+    WatcherRegistry viaFrame;
+    viaFrame.setLimits(smallLimits());
+    viaFrame.ingestFrame(0, bgraFrame(flatFrame()));
+    const int a = add(&viaFrame, roi);
+    viaFrame.ingestFrame(0, bgraFrame(flatFrame()));      // baseline
+    viaFrame.ingestFrame(0, bgraFrame(framePatched(roi, 120)));
+
+    WatcherRegistry viaImage;
+    viaImage.setLimits(smallLimits());
+    viaImage.ingestImage(0, flatFrame());
+    const int b = add(&viaImage, roi);
+    viaImage.ingestImage(0, flatFrame());                 // baseline
+    viaImage.ingestImage(0, framePatched(roi, 120));
+
+    QVERIFY(a > 0 && b > 0);
+    qint64 c1 = 0, c2 = 0;
+    const auto ef = viaFrame.eventsSince(0, &c1);
+    const auto ei = viaImage.eventsSince(0, &c2);
+    QCOMPARE(ef.size(), 1);
+    QCOMPARE(ei.size(), 1);
+    // Rounding differs (BT.601 integer weights vs Qt's greyscale), so
+    // allow a point of slack rather than demanding bit equality.
+    QVERIFY2(qAbs(ef.first().delta - ei.first().delta) < 1.0,
+             qPrintable(QStringLiteral("frame %1 vs image %2")
+                            .arg(ef.first().delta).arg(ei.first().delta)));
 }
 
 QTEST_MAIN(TestWatcher)

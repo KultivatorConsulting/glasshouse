@@ -33,6 +33,22 @@ QString stampOf(qint64 wallMs) {
         QStringLiteral("HH:mm:ss.zzz"));
 }
 
+
+// One line per screen, the first time a frame arrives for it. Which branch
+// ingestFrame takes is a 2x difference in viewer CPU, and it used to be
+// invisible from the outside — the slow path logged nothing at all.
+void logPixelPath(QSet<int>& logged, int screen,
+                  QVideoFrameFormat::PixelFormat fmt, bool inPlace) {
+    if (logged.contains(screen)) return;
+    logged.insert(screen);
+    qCInfo(lcWatch).nospace()
+        << "watcher: screen " << screen << " frames are "
+        << QVideoFrameFormat::pixelFormatToString(fmt)
+        << (inPlace ? " - sampled in place"
+                    : " - no in-place reader for this format, converting the "
+                      "whole frame every frame (expect noticeably more CPU)");
+}
+
 }  // namespace
 
 QString watcherTriggerName(WatcherTrigger t) {
@@ -310,13 +326,44 @@ void WatcherRegistry::ingestFrame(int screen, const QVideoFrame& frame) {
     }
     if (!haveWatcher) return;
 
-    // The decoders in use hand us a planar YUV frame (VA-API gives NV12,
-    // the software paths I420), and for those the luma plane is exactly
-    // the metric we want — so the hot path reads it in place and never
-    // converts a full frame. Anything else falls back to toImage(), which
-    // is correct for every format at the cost of a conversion per frame.
-    int lumaBytes = 0;
+    // Which bytes to read, and how. Glasshouse's own pipelines decide this,
+    // not the decoder: mjpegpipeline and videopipeline both put
+    // `videoconvert ! video/x-raw,format=BGRA` in front of their appsink,
+    // so what arrives here is packed BGRA. The first version of this switch
+    // handled only planar YUV, on the assumption that a decoder hands back
+    // NV12 or I420 — so in practice every frame fell through to the
+    // whole-frame conversion below, measured at about +46% of a core for a
+    // single 42x22 watcher. Everything we can read in place is listed.
+    PixelView view;
+    bool inPlace = true;
     switch (frame.pixelFormat()) {
+        // Packed 32-bit. The offsets are byte positions within a pixel,
+        // which is what these names mean in Qt Multimedia — unlike QImage,
+        // whose ARGB32 names a word and so reverses on little-endian.
+        case QVideoFrameFormat::Format_BGRA8888:
+        case QVideoFrameFormat::Format_BGRA8888_Premultiplied:
+        case QVideoFrameFormat::Format_BGRX8888:
+            view.bytesPerPixel = 4; view.isLuma = false;
+            view.bOffset = 0; view.gOffset = 1; view.rOffset = 2;
+            break;
+        case QVideoFrameFormat::Format_RGBA8888:
+        case QVideoFrameFormat::Format_RGBX8888:
+            view.bytesPerPixel = 4; view.isLuma = false;
+            view.rOffset = 0; view.gOffset = 1; view.bOffset = 2;
+            break;
+        case QVideoFrameFormat::Format_ARGB8888:
+        case QVideoFrameFormat::Format_ARGB8888_Premultiplied:
+        case QVideoFrameFormat::Format_XRGB8888:
+            view.bytesPerPixel = 4; view.isLuma = false;
+            view.rOffset = 1; view.gOffset = 2; view.bOffset = 3;
+            break;
+        case QVideoFrameFormat::Format_ABGR8888:
+        case QVideoFrameFormat::Format_XBGR8888:
+            view.bytesPerPixel = 4; view.isLuma = false;
+            view.bOffset = 1; view.gOffset = 2; view.rOffset = 3;
+            break;
+
+        // Planar and semi-planar YUV: plane 0 is the luma we want.
         case QVideoFrameFormat::Format_NV12:
         case QVideoFrameFormat::Format_NV21:
         case QVideoFrameFormat::Format_IMC1:
@@ -327,31 +374,42 @@ void WatcherRegistry::ingestFrame(int screen, const QVideoFrame& frame) {
         case QVideoFrameFormat::Format_YUV422P:
         case QVideoFrameFormat::Format_YV12:
         case QVideoFrameFormat::Format_Y8:
-            lumaBytes = 1;
+            view.bytesPerPixel = 1; view.lumaOffset = 0;
             break;
         case QVideoFrameFormat::Format_P010:
         case QVideoFrameFormat::Format_P016:
         case QVideoFrameFormat::Format_Y16:
-            lumaBytes = 2;      // little-endian; the high byte is enough
+        case QVideoFrameFormat::Format_YUV420P10:
+            view.bytesPerPixel = 2; view.lumaOffset = 1;  // LE: the high byte
             break;
+
+        // Packed YUV 4:2:2 and 4:4:4 — luma is every second or fourth byte.
+        case QVideoFrameFormat::Format_YUYV:
+            view.bytesPerPixel = 2; view.lumaOffset = 0;
+            break;
+        case QVideoFrameFormat::Format_UYVY:
+            view.bytesPerPixel = 2; view.lumaOffset = 1;
+            break;
+        case QVideoFrameFormat::Format_AYUV:
+        case QVideoFrameFormat::Format_AYUV_Premultiplied:
+            view.bytesPerPixel = 4; view.lumaOffset = 1;
+            break;
+
         default:
-            lumaBytes = 0;
+            inPlace = false;
             break;
     }
 
-    if (lumaBytes > 0) {
+    if (inPlace) {
         QVideoFrame f = frame;   // map() is non-const
         if (f.map(QVideoFrame::ReadOnly)) {
-            PixelView view;
-            view.bits          = f.bits(0);
-            view.bytesPerLine  = f.bytesPerLine(0);
-            view.bytesPerPixel = lumaBytes;
-            view.width         = f.width();
-            view.height        = f.height();
-            view.isLuma        = true;
-            view.lumaOffset    = lumaBytes == 2 ? 1 : 0;
+            view.bits         = f.bits(0);
+            view.bytesPerLine = f.bytesPerLine(0);
+            view.width        = f.width();
+            view.height       = f.height();
 
             if (view.valid()) {
+                logPixelPath(m_pathLogged, screen, frame.pixelFormat(), true);
                 // The colour closure runs only for a frame worth keeping,
                 // so a quiet region never pays for a conversion. It cannot
                 // read the mapped frame, so it unmaps first via a copy.
@@ -359,13 +417,15 @@ void WatcherRegistry::ingestFrame(int screen, const QVideoFrame& frame) {
                 detect(screen, view, [copy]() mutable {
                     return copy.toImage();
                 });
+                f.unmap();
+                return;
             }
             f.unmap();
-            return;
         }
-        qCDebug(lcWatch) << "watcher: could not map frame on screen" << screen
-                         << "- falling back to an image conversion";
     }
+
+    ++m_slowPathFrames;
+    logPixelPath(m_pathLogged, screen, frame.pixelFormat(), false);
 
     QVideoFrame copy = frame;
     const QImage img = copy.toImage();

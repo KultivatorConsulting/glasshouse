@@ -38,5 +38,6 @@ target_link_libraries(test_watcher
         glasshouse_watch
         Qt6::Test
         Qt6::Gui
+        Qt6::Multimedia
 )
 add_test(NAME watcher COMMAND test_watcher)

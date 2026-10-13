@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     works and the viewer keeps no subscriber list.
   - Budgets and the hotkey are configurable under `watchers:` in
     config.yaml. See DESIGN.md §10.12 and HARNESS.md §5.
+  - Detection samples the mapped frame in place, including the packed
+    BGRA both pipelines actually emit. Verified live on a two-head
+    session: a single 42×22 watcher adds no measurable CPU, where an
+    earlier build that recognised only planar YUV fell back to two
+    whole-frame conversions per frame and cost about +46% of a core.
+    The viewer logs which path a screen takes, once, on its first frame.
 
 ### Documentation
 - **The providers are now measured against each other, not just
